@@ -105,6 +105,26 @@ button { font: inherit; }
 .chip-value { margin: .2rem 0 0; font-size: 1.2rem; font-weight: 700; }
 .chip-subvalue { margin: .25rem 0 0; color: var(--ink-muted); font-size: .78rem; }
 .rank-chip-btn { text-align: left; }
+.chip-action-link {
+  margin-top: .55rem;
+  display: inline-flex;
+  text-decoration: none;
+}
+.state-pill {
+  margin-top: .5rem;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid #c5d5e8;
+  padding: .36rem .72rem;
+  font-weight: 700;
+  font-size: .78rem;
+}
+.tone-restored { background: #e8f8ef; color: #145c2f; border-color: #b8e7c9; }
+.tone-relaxed { background: #e8f1ff; color: #1d4f95; border-color: #bdd2f4; }
+.tone-engaged { background: #fff6de; color: #7a4b00; border-color: #f0d39b; }
+.tone-stressed { background: #ffe9e6; color: #8a1f14; border-color: #f1b4ad; }
+.tone-neutral { background: #f2f5fa; color: #47607d; border-color: #d7e1ef; }
 
 .settings-panel { margin-top: 1.5rem; border-top: 1px solid #d4dfec; padding-top: 1.2rem; }
 .settings-panel h2 { margin: 0; font-size: 1rem; }
@@ -153,6 +173,15 @@ input, select { width: 100%; padding: .6rem .7rem; border-radius: 10px; border: 
 .metric-card p { margin: 0; color: var(--ink-muted); }
 .metric-card h2 { margin: .35rem 0 0; font-size: 1.7rem; word-break: break-word; }
 .metric-note { margin-top: .3rem; display: inline-block; color: var(--ink-muted); font-size: .85rem; }
+.oura-card {
+  background: linear-gradient(140deg, rgba(255,255,255,.98), rgba(237,246,255,.9));
+}
+.oura-stats-grid {
+  margin-top: .8rem;
+  display: grid;
+  gap: .8rem;
+  grid-template-columns: repeat(2,minmax(0,1fr));
+}
 .rank-card { background: linear-gradient(140deg,#132a44,#16375a); border-color: #1f476e; }
 .rank-card p, .rank-card h2, .rank-card span { color: #f4f9ff; }
 .rank-card span { font-size: .86rem; }
@@ -234,7 +263,7 @@ input, select { width: 100%; padding: .6rem .7rem; border-radius: 10px; border: 
 }
 @media (max-width: 640px) {
   .timer-card { padding: 1.2rem; border-radius: 24px; }
-  .settings-grid, .manual-log-grid, .stats-metrics, .rank-ladder, .live-stats, .compare-grid { grid-template-columns: 1fr; }
+  .settings-grid, .manual-log-grid, .stats-metrics, .rank-ladder, .live-stats, .compare-grid, .oura-stats-grid { grid-template-columns: 1fr; }
   .step-grid { grid-template-columns: 1fr; }
   .control-row, .inline-row { flex-wrap: wrap; width: 100%; }
   .primary, .ghost { flex: 1; }

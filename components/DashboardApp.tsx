@@ -16,6 +16,15 @@ type DashboardSummary = {
   rankSubtitle: string;
 };
 
+type OuraMetrics = {
+  configured: boolean;
+  connected: boolean;
+  heartRate: number | null;
+  heartRateTime: string | null;
+  stressState: string | null;
+  stressDate: string | null;
+};
+
 const SETTINGS_KEY = "pulseSessionSettingsV1";
 
 const MODES: Record<Mode, { label: string; color: string; duration: number }> = {
@@ -44,6 +53,15 @@ function todayDateInputValue() {
   return toDateInputValue(new Date());
 }
 
+function stressTone(state: string | null | undefined) {
+  const normalized = String(state || "").toLowerCase();
+  if (normalized.includes("restore")) return "tone-restored";
+  if (normalized.includes("relax")) return "tone-relaxed";
+  if (normalized.includes("engag")) return "tone-engaged";
+  if (normalized.includes("stress")) return "tone-stressed";
+  return "tone-neutral";
+}
+
 function yesterdayDateInputValue() {
   const d = new Date();
   d.setDate(d.getDate() - 1);
@@ -67,6 +85,7 @@ export function DashboardApp({ username }: { username: string }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<string>("all");
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [ouraMetrics, setOuraMetrics] = useState<OuraMetrics | null>(null);
   const [mode, setMode] = useState<Mode>("focus");
   const [remaining, setRemaining] = useState(MODES.focus.duration);
   const [running, setRunning] = useState(false);
@@ -99,6 +118,16 @@ export function DashboardApp({ username }: { username: string }) {
 
   useEffect(() => {
     void loadProjects();
+  }, []);
+
+  useEffect(() => {
+    void loadOuraMetrics();
+
+    const timer = window.setInterval(() => {
+      void loadOuraMetrics();
+    }, 60000);
+
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -205,6 +234,13 @@ export function DashboardApp({ username }: { username: string }) {
 
     const payload = (await res.json()) as DashboardSummary;
     setSummary(payload);
+  }
+
+  async function loadOuraMetrics() {
+    const res = await fetch("/api/oura/metrics", { cache: "no-store" });
+    if (!res.ok) return;
+    const payload = (await res.json()) as OuraMetrics;
+    setOuraMetrics(payload);
   }
 
   async function addManualLog() {
@@ -365,7 +401,7 @@ export function DashboardApp({ username }: { username: string }) {
 
         <section className="project-panel project-panel-bottom" aria-label="Project tags">
           <div className="inline-field inline-grow">
-            <label>Active Project (Timer Scope)</label>
+            <label>Select Project:</label>
             <div className="badge-picker">
               <button
                 className={`project-badge ${projectId === "all" ? "is-active" : ""}`}
@@ -398,6 +434,24 @@ export function DashboardApp({ username }: { username: string }) {
           <article className="stat-chip">
             <p className="chip-label">Today</p>
             <p className="chip-value">{summary?.todayMinutes ?? 0} min</p>
+          </article>
+          <article className="stat-chip">
+            <p className="chip-label">Oura Live</p>
+            {!ouraMetrics?.configured ? (
+              <p className="chip-subvalue">Set Oura env vars to enable wearable stats.</p>
+            ) : !ouraMetrics.connected ? (
+              <a className="ghost chip-action-link" href="/api/oura/connect">
+                Connect Oura
+              </a>
+            ) : (
+              <>
+                <p className="chip-value">{ouraMetrics.heartRate ?? "--"} bpm</p>
+                <p className="chip-subvalue">Current heart rate</p>
+                <p className={`state-pill ${stressTone(ouraMetrics.stressState)}`}>
+                  Current Stress: {ouraMetrics.stressState ?? "--"}
+                </p>
+              </>
+            )}
           </article>
           <button className="stat-chip rank-chip-btn" onClick={() => setRankModalOpen(true)}>
             <p className="chip-label">7-Day Rank (tap for ladder)</p>

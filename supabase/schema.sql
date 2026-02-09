@@ -30,3 +30,14 @@ create table if not exists focus_logs (
 
 create index if not exists idx_focus_logs_user_date on focus_logs(user_id, log_date);
 create index if not exists idx_focus_logs_user_project_date on focus_logs(user_id, project_id, log_date);
+
+create table if not exists oura_connections (
+  user_id uuid primary key references app_users(id) on delete cascade,
+  access_token text not null,
+  refresh_token text not null,
+  token_type text,
+  scope text,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
