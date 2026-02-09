@@ -23,6 +23,7 @@ type OuraMetrics = {
   heartRateTime: string | null;
   stressState: string | null;
   stressDate: string | null;
+  warning?: string | null;
 };
 
 const SETTINGS_KEY = "pulseSessionSettingsV1";
@@ -93,6 +94,7 @@ export function DashboardApp({ username }: { username: string }) {
   const [projectId, setProjectId] = useState<string>("all");
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [ouraMetrics, setOuraMetrics] = useState<OuraMetrics | null>(null);
+  const [ouraError, setOuraError] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("focus");
   const [remaining, setRemaining] = useState(MODES.focus.duration);
   const [running, setRunning] = useState(false);
@@ -267,9 +269,13 @@ export function DashboardApp({ username }: { username: string }) {
   }
 
   async function loadOuraMetrics() {
+    setOuraError(null);
     const res = await fetch("/api/oura/metrics", { cache: "no-store" });
-    if (!res.ok) return;
-    const payload = (await res.json()) as OuraMetrics;
+    const payload = (await res.json()) as OuraMetrics & { error?: string };
+    if (!res.ok) {
+      setOuraError(payload.error || "Could not fetch Oura metrics.");
+      return;
+    }
     setOuraMetrics(payload);
   }
 
@@ -431,8 +437,9 @@ export function DashboardApp({ username }: { username: string }) {
 
         <section className="project-panel project-panel-bottom" aria-label="Project tags">
           <div className="inline-field inline-grow">
-            <label>Select Project:</label>
+         
             <div className="badge-picker">
+              <h3>Select Project:</h3>
               <button
                 className={`project-badge ${projectId === "all" ? "is-active" : ""}`}
                 style={getBadgeStyles("all")}
@@ -467,12 +474,22 @@ export function DashboardApp({ username }: { username: string }) {
           </article>
           <article className="stat-chip">
             <p className="chip-label">Oura Live</p>
-            {!ouraMetrics?.configured ? (
+            {ouraError ? (
+              <>
+                <p className="chip-subvalue">Oura data unavailable right now.</p>
+                <p className="chip-subvalue">{ouraError}</p>
+              </>
+            ) : !ouraMetrics ? (
+              <p className="chip-subvalue">Loading Oura metrics...</p>
+            ) : !ouraMetrics.configured ? (
               <p className="chip-subvalue">Set Oura env vars to enable wearable stats.</p>
             ) : !ouraMetrics.connected ? (
-              <a className="ghost chip-action-link" href="/api/oura/connect">
-                Connect Oura
-              </a>
+              <>
+                {ouraMetrics.warning ? <p className="chip-subvalue">{ouraMetrics.warning}</p> : null}
+                <a className="ghost chip-action-link" href="/api/oura/connect?next=/settings">
+                  Connect Oura
+                </a>
+              </>
             ) : (
               <>
                 <p className="chip-value">{ouraMetrics.heartRate ?? "--"} bpm</p>

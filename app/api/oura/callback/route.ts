@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
-import { exchangeCodeForToken } from "@/lib/oura";
+import { exchangeCodeForToken, revokeOuraConnection } from "@/lib/oura";
 import { requireSession } from "@/lib/route-auth";
 
 const OURA_STATE_COOKIE = "oura_oauth_state";
@@ -24,6 +24,8 @@ export async function GET(req: NextRequest) {
   }
 
   try {
+    // Remove stale credentials first so failed re-auth does not leave broken state.
+    await revokeOuraConnection(session.userId);
     await exchangeCodeForToken(session.userId, code);
 
     const res = NextResponse.redirect(redirectUrl);
@@ -39,6 +41,10 @@ export async function GET(req: NextRequest) {
   } catch (error) {
     console.error("GET /api/oura/callback failed", error);
     redirectUrl.searchParams.set("oura", "connect_failed");
+    if (process.env.NODE_ENV !== "production") {
+      const raw = String(error instanceof Error ? error.message : error);
+      redirectUrl.searchParams.set("oura_reason", raw.slice(0, 180));
+    }
 
     const res = NextResponse.redirect(redirectUrl);
     res.cookies.delete(OURA_STATE_COOKIE);

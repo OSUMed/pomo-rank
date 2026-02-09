@@ -4,6 +4,8 @@ import { supabase } from "@/lib/supabase";
 const OURA_AUTH_URL = "https://cloud.ouraring.com/oauth/authorize";
 const OURA_TOKEN_URL = "https://api.ouraring.com/oauth/token";
 const OURA_API_BASE = "https://api.ouraring.com";
+const TOKEN_EXPIRY_BUFFER_MS = 90 * 1000;
+const refreshLocks = new Map<string, Promise<string>>();
 
 type OuraConnectionRow = {
   user_id: string;
@@ -98,7 +100,14 @@ async function fetchToken(params: Record<string, string>) {
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Oura token exchange failed: ${res.status} ${text}`);
+    let detail = text;
+    try {
+      const parsed = JSON.parse(text) as { detail?: string; title?: string; error?: string; error_description?: string };
+      detail = parsed.detail || parsed.error_description || parsed.title || parsed.error || text;
+    } catch {
+      // keep raw text
+    }
+    throw new Error(`Oura token exchange failed (${res.status}): ${detail}`);
   }
 
   return (await res.json()) as OuraTokenResponse;
@@ -117,13 +126,39 @@ export async function exchangeCodeForToken(userId: string, code: string) {
 }
 
 async function refreshAccessToken(userId: string, refreshToken: string) {
-  const token = await fetchToken({
-    grant_type: "refresh_token",
-    refresh_token: refreshToken,
-  });
+  const existing = refreshLocks.get(userId);
+  if (existing) return existing;
 
-  await saveToken(userId, token);
-  return token.access_token;
+  const refreshPromise = (async () => {
+    try {
+      const token = await fetchToken({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+      });
+
+      await saveToken(userId, token);
+      return token.access_token;
+    } catch (error) {
+      // Oura refresh tokens are single-use. If another request already rotated
+      // the token, reuse the newly stored access token instead of hard-failing.
+      const message = String(error);
+      if (message.includes("invalid_grant")) {
+        const latest = await getOuraConnection(userId);
+        if (latest) {
+          const latestExpiry = new Date(latest.expires_at).getTime();
+          if (Number.isFinite(latestExpiry) && latestExpiry - TOKEN_EXPIRY_BUFFER_MS > Date.now()) {
+            return latest.access_token;
+          }
+        }
+      }
+      throw error;
+    } finally {
+      refreshLocks.delete(userId);
+    }
+  })();
+
+  refreshLocks.set(userId, refreshPromise);
+  return refreshPromise;
 }
 
 export async function revokeOuraConnection(userId: string) {
@@ -136,9 +171,7 @@ async function getValidAccessToken(userId: string) {
   if (!conn) return null;
 
   const expiresAtMs = new Date(conn.expires_at).getTime();
-  const bufferMs = 90 * 1000;
-
-  if (Number.isFinite(expiresAtMs) && expiresAtMs - bufferMs > Date.now()) {
+  if (Number.isFinite(expiresAtMs) && expiresAtMs - TOKEN_EXPIRY_BUFFER_MS > Date.now()) {
     return conn.access_token;
   }
 
@@ -197,7 +230,30 @@ function pickStressState(row: Record<string, unknown>) {
 }
 
 export async function getOuraMetrics(userId: string) {
-  const token = await getValidAccessToken(userId);
+  let token: string | null = null;
+  try {
+    token = await getValidAccessToken(userId);
+  } catch (error) {
+    console.error("Oura token lookup/refresh failed", error);
+    try {
+      await revokeOuraConnection(userId);
+    } catch (cleanupError) {
+      console.error("Failed to cleanup invalid Oura connection", cleanupError);
+    }
+    const detail =
+      process.env.NODE_ENV !== "production"
+        ? `Token refresh failed: ${String(error instanceof Error ? error.message : error).slice(0, 160)}`
+        : "Token refresh failed. Please reconnect Oura.";
+    return {
+      connected: false,
+      heartRate: null as number | null,
+      heartRateTime: null as string | null,
+      stressState: null as string | null,
+      stressDate: null as string | null,
+      warning: detail,
+    };
+  }
+
   if (!token) {
     return {
       connected: false,
@@ -205,36 +261,44 @@ export async function getOuraMetrics(userId: string) {
       heartRateTime: null as string | null,
       stressState: null as string | null,
       stressDate: null as string | null,
+      warning: null as string | null,
     };
   }
 
   const end = new Date();
   const start = new Date(end.getTime() - 12 * 60 * 60 * 1000);
+  let latestHeart: Record<string, unknown> | null = null;
+  let latestStress: Record<string, unknown> | null = null;
 
-  const [heartRatePayload, stressPayload] = await Promise.all([
-    fetchOuraCollection<Record<string, unknown>>(
+  try {
+    const heartRatePayload = await fetchOuraCollection<Record<string, unknown>>(
       "/v2/usercollection/heartrate",
       token,
       new URLSearchParams({
         start_datetime: start.toISOString(),
         end_datetime: end.toISOString(),
       }),
-    ),
-    fetchOuraCollection<Record<string, unknown>>(
+    );
+    const heartRows = heartRatePayload.data ?? [];
+    latestHeart = heartRows[heartRows.length - 1] ?? null;
+  } catch (error) {
+    console.error("Oura heartrate fetch failed", error);
+  }
+
+  try {
+    const stressPayload = await fetchOuraCollection<Record<string, unknown>>(
       "/v2/usercollection/daily_stress",
       token,
       new URLSearchParams({
         start_date: toIsoDate(new Date(end.getTime() - 14 * 24 * 60 * 60 * 1000)),
         end_date: toIsoDate(end),
       }),
-    ),
-  ]);
-
-  const heartRows = heartRatePayload.data ?? [];
-  const latestHeart = heartRows[heartRows.length - 1] ?? null;
-
-  const stressRows = stressPayload.data ?? [];
-  const latestStress = stressRows[stressRows.length - 1] ?? null;
+    );
+    const stressRows = stressPayload.data ?? [];
+    latestStress = stressRows[stressRows.length - 1] ?? null;
+  } catch (error) {
+    console.error("Oura daily_stress fetch failed", error);
+  }
 
   return {
     connected: true,
@@ -242,5 +306,6 @@ export async function getOuraMetrics(userId: string) {
     heartRateTime: latestHeart ? String(latestHeart.timestamp ?? "") || null : null,
     stressState: latestStress ? pickStressState(latestStress) : null,
     stressDate: latestStress ? String(latestStress.day ?? latestStress.date ?? "") || null : null,
+    warning: null as string | null,
   };
 }
