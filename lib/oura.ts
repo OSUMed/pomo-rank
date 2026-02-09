@@ -383,7 +383,12 @@ function normalizeDurationToHours(raw: number | null, unitHint?: "minutes" | "se
   if (!raw || raw <= 0) return 0;
   if (unitHint === "minutes") return toHours(raw);
   if (unitHint === "seconds") return toHoursFromSeconds(raw);
-  if (unitHint === "hours") return Math.round(raw * 10) / 10;
+  if (unitHint === "hours") {
+    // Guardrail: daily stress spans are frequently minute-like values.
+    // If an \"hours\" field reports >12, interpret as minutes to avoid impossible 24h+ displays.
+    if (raw > 12) return toHours(raw);
+    return Math.round(raw * 10) / 10;
+  }
 
   // Fallback heuristic for unknown keys:
   //  - >= 3600 likely seconds
@@ -647,6 +652,8 @@ export async function getOuraBiofeedback(
     })
     .filter((row): row is OuraHeartRateSample => Boolean(row))
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const stressRow = (stressResult.data ?? [])[0] ?? null;
+  const stressToday = summarizeStressToday(stressRow);
 
   if (isOuraDebugEnabled(debug)) {
     const span = minMaxTimestamp(samples);
@@ -656,17 +663,21 @@ export async function getOuraBiofeedback(
       minTimestamp: span.min,
       maxTimestamp: span.max,
     });
+    console.info("[OURA_DEBUG] stress_summary", {
+      rawKeys: stressRow ? Object.keys(stressRow).sort() : [],
+      rawRow: stressRow,
+      normalized: stressToday,
+    });
   }
 
   const latest = samples[samples.length - 1] ?? null;
-  const stressRow = (stressResult.data ?? [])[0] ?? null;
 
   return {
     connected: true,
     heartRateSamples: samples,
     latestHeartRate: latest?.bpm ?? null,
     latestHeartRateTime: latest?.timestamp ?? null,
-    stressToday: summarizeStressToday(stressRow),
+    stressToday,
     profile,
     warning: null,
   };

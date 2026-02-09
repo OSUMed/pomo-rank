@@ -72,6 +72,16 @@ function formatSampleTime(value: string | null) {
   }).format(dt);
 }
 
+function formatDurationFromMinutes(minutes: number) {
+  const totalMinutes = Math.max(0, Math.round(minutes));
+  if (totalMinutes < 60) return `${totalMinutes} min`;
+
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return m > 0 ? `${h}h ${m}min` : `${h}h`;
+}
+
+
 function loadSettings(): SessionSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -274,10 +284,11 @@ export function SettingsApp({ username }: { username: string }) {
                     <p className="chip-label">Today Stress</p>
                     {ouraMetrics.stressToday ? (
                       <>
-                        <p className="chip-value">{ouraMetrics.stressToday.stressedHours}h stressed</p>
+                        <p className="chip-value">{formatDurationFromMinutes(ouraMetrics.stressToday.stressedHours)} stressed</p>
                         <p className="chip-subvalue">
-                          Engaged {ouraMetrics.stressToday.engagedHours}h · Relaxed {ouraMetrics.stressToday.relaxedHours}h · Restored{" "}
-                          {ouraMetrics.stressToday.restoredHours}h
+                          Engaged {formatDurationFromMinutes(ouraMetrics.stressToday.engagedHours)} · Relaxed{" "}
+                          {formatDurationFromMinutes(ouraMetrics.stressToday.relaxedHours)} · Restored{" "}
+                          {formatDurationFromMinutes(ouraMetrics.stressToday.restoredHours)}
                         </p>
                       </>
                     ) : (

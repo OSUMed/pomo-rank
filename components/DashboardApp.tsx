@@ -100,6 +100,17 @@ function formatTimestampLabel(value: string | null) {
   }).format(date);
 }
 
+function formatDurationFromMinutes(minutes: number) {
+  const totalMinutes = Math.max(0, Math.round(minutes));
+  if (totalMinutes < 60) return `${totalMinutes} min`;
+
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return m > 0 ? `${h}h ${m}min` : `${h}h`;
+}
+
+
+
 function toDateInputValue(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
@@ -656,7 +667,7 @@ export function DashboardApp({ username }: { username: string }) {
   const activeMode = MODES[mode];
   const ringOffset = 590 * (1 - remaining / (durations[mode] || 1));
   const stressTodaySummary = ouraMetrics?.stressToday
-    ? `Today: Stressed ${ouraMetrics.stressToday.stressedHours}h`
+    ? `Today: Stressed ${formatDurationFromMinutes(ouraMetrics.stressToday.stressedHours)}`
     : "Today: No stress data";
   const activeProject = projectId === "all" ? null : projects.find((p) => p.id === projectId) || null;
   const activeProjectName = activeProject?.name || "No Project";
@@ -992,10 +1003,10 @@ export function DashboardApp({ username }: { username: string }) {
                   <div className="stress-context">
                     <p className="chip-label">Today so far</p>
                     <div className="stress-chip-row">
-                      <span className="stress-chip">Stressed · {ouraMetrics.stressToday.stressedHours}h</span>
-                      <span className="stress-chip">Engaged · {ouraMetrics.stressToday.engagedHours}h</span>
-                      <span className="stress-chip">Relaxed · {ouraMetrics.stressToday.relaxedHours}h</span>
-                      <span className="stress-chip">Restored · {ouraMetrics.stressToday.restoredHours}h</span>
+                      <span className="stress-chip">Stressed · {formatDurationFromMinutes(ouraMetrics.stressToday.stressedHours)}</span>
+                      <span className="stress-chip">Engaged · {formatDurationFromMinutes(ouraMetrics.stressToday.engagedHours)}</span>
+                      <span className="stress-chip">Relaxed · {formatDurationFromMinutes(ouraMetrics.stressToday.relaxedHours)}</span>
+                      <span className="stress-chip">Restored · {formatDurationFromMinutes(ouraMetrics.stressToday.restoredHours)}</span>
                     </div>
                   </div>
                 ) : null}
