@@ -55,6 +55,23 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function formatSampleTime(value: string | null) {
+  if (!value) return "--";
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return value;
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+    timeZoneName: "short",
+  }).format(dt);
+}
+
 function loadSettings(): SessionSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -249,14 +266,31 @@ export function SettingsApp({ username }: { username: string }) {
                 <p className="chip-subvalue">Connected. Oura login + consent is required once to sync data.</p>
                 <div className="oura-stats-grid">
                   <article className="stat-chip">
-                    <p className="chip-label">Biofeedback Baseline</p>
-                    <p className="chip-value">{ouraMetrics.profile.baselineMedianBpm ?? "--"} bpm</p>
+                    <p className="chip-label">Current HR</p>
+                    <p className="chip-value">{ouraMetrics.latestHeartRate ?? "--"} bpm</p>
+                    <p className="chip-subvalue">Last sample: {formatSampleTime(ouraMetrics.latestHeartRateTime)}</p>
                   </article>
                   <article className="stat-chip">
-                    <p className="chip-label">Profile Samples</p>
-                    <p className="chip-value">{ouraMetrics.profile.sampleCount}</p>
+                    <p className="chip-label">Today Stress</p>
+                    {ouraMetrics.stressToday ? (
+                      <>
+                        <p className="chip-value">{ouraMetrics.stressToday.stressedHours}h stressed</p>
+                        <p className="chip-subvalue">
+                          Engaged {ouraMetrics.stressToday.engagedHours}h · Relaxed {ouraMetrics.stressToday.relaxedHours}h · Restored{" "}
+                          {ouraMetrics.stressToday.restoredHours}h
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="chip-value">--</p>
+                        <p className="chip-subvalue">No daily stress samples yet.</p>
+                      </>
+                    )}
                   </article>
                 </div>
+                <p className="chip-subvalue">
+                  Adaptive baseline training: {ouraMetrics.profile.baselineMedianBpm ?? "--"} bpm · Samples {ouraMetrics.profile.sampleCount}
+                </p>
                 <div className="control-row">
                   <button className="ghost" disabled={ouraBusy} onClick={() => void loadOuraMetrics()}>
                     Refresh Oura Data

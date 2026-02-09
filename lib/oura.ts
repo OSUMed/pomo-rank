@@ -374,6 +374,49 @@ function toHours(minutes: number | null | undefined) {
   return Math.round((minutes / 60) * 10) / 10;
 }
 
+function toHoursFromSeconds(seconds: number | null | undefined) {
+  if (!seconds || seconds <= 0) return 0;
+  return Math.round((seconds / 3600) * 10) / 10;
+}
+
+function normalizeDurationToHours(raw: number | null, unitHint?: "minutes" | "seconds" | "hours") {
+  if (!raw || raw <= 0) return 0;
+  if (unitHint === "minutes") return toHours(raw);
+  if (unitHint === "seconds") return toHoursFromSeconds(raw);
+  if (unitHint === "hours") return Math.round(raw * 10) / 10;
+
+  // Fallback heuristic for unknown keys:
+  //  - >= 3600 likely seconds
+  //  - > 24 likely minutes
+  //  - <= 24 likely hours
+  if (raw >= 3600) return toHoursFromSeconds(raw);
+  if (raw > 24) return toHours(raw);
+  return Math.round(raw * 10) / 10;
+}
+
+function pickDurationHours(
+  row: Record<string, unknown>,
+  keys: { minutes?: string[]; seconds?: string[]; hours?: string[]; fallback?: string[] },
+) {
+  for (const key of keys.minutes ?? []) {
+    const value = asNumber(row[key]);
+    if (value !== null) return normalizeDurationToHours(value, "minutes");
+  }
+  for (const key of keys.seconds ?? []) {
+    const value = asNumber(row[key]);
+    if (value !== null) return normalizeDurationToHours(value, "seconds");
+  }
+  for (const key of keys.hours ?? []) {
+    const value = asNumber(row[key]);
+    if (value !== null) return normalizeDurationToHours(value, "hours");
+  }
+  for (const key of keys.fallback ?? []) {
+    const value = asNumber(row[key]);
+    if (value !== null) return normalizeDurationToHours(value);
+  }
+  return 0;
+}
+
 function defaultProfile(): OuraFocusProfile {
   return {
     baselineMedianBpm: null,
@@ -423,33 +466,53 @@ function normalizeStressStateLabel(value: string) {
 function summarizeStressToday(row: Record<string, unknown> | null): OuraStressBuckets | null {
   if (!row) return null;
 
-  const restoredMinutes = asNumber(row.restorative_minutes) ?? asNumber(row.recovery_minutes) ?? 0;
-  const relaxedMinutes = asNumber(row.low_stress_minutes) ?? asNumber(row.stress_low) ?? 0;
-  const engagedMinutes = asNumber(row.medium_stress_minutes) ?? asNumber(row.stress_medium) ?? 0;
-  const stressedMinutes = asNumber(row.high_stress_minutes) ?? asNumber(row.stress_high) ?? 0;
+  const restoredHours = pickDurationHours(row, {
+    minutes: ["restorative_minutes", "recovery_minutes", "restored_minutes"],
+    seconds: ["restorative_seconds", "recovery_seconds", "restored_seconds"],
+    hours: ["restorative_hours", "recovery_hours", "restored_hours"],
+    fallback: ["restorative", "recovery", "restored"],
+  });
+  const relaxedHours = pickDurationHours(row, {
+    minutes: ["low_stress_minutes", "relaxed_minutes", "stress_low"],
+    seconds: ["low_stress_seconds", "relaxed_seconds"],
+    hours: ["low_stress_hours", "relaxed_hours"],
+    fallback: ["relaxed"],
+  });
+  const engagedHours = pickDurationHours(row, {
+    minutes: ["medium_stress_minutes", "engaged_minutes", "stress_medium"],
+    seconds: ["medium_stress_seconds", "engaged_seconds"],
+    hours: ["medium_stress_hours", "engaged_hours"],
+    fallback: ["engaged"],
+  });
+  const stressedHours = pickDurationHours(row, {
+    minutes: ["high_stress_minutes", "stressed_minutes", "stress_high"],
+    seconds: ["high_stress_seconds", "stressed_seconds"],
+    hours: ["high_stress_hours", "stressed_hours"],
+    fallback: ["stressed"],
+  });
 
   const directState =
     (typeof row.stress_state === "string" ? normalizeStressStateLabel(row.stress_state) : null) ||
     (typeof row.state === "string" ? normalizeStressStateLabel(row.state) : null);
 
   if (directState) {
-    if (directState === "Stressed" && stressedMinutes === 0) {
+    if (directState === "Stressed" && stressedHours === 0) {
       return {
         date: String(row.day ?? row.date ?? "") || null,
         stressedHours: 0.1,
-        engagedHours: toHours(engagedMinutes),
-        relaxedHours: toHours(relaxedMinutes),
-        restoredHours: toHours(restoredMinutes),
+        engagedHours,
+        relaxedHours,
+        restoredHours,
       };
     }
   }
 
   return {
     date: String(row.day ?? row.date ?? "") || null,
-    stressedHours: toHours(stressedMinutes),
-    engagedHours: toHours(engagedMinutes),
-    relaxedHours: toHours(relaxedMinutes),
-    restoredHours: toHours(restoredMinutes),
+    stressedHours,
+    engagedHours,
+    relaxedHours,
+    restoredHours,
   };
 }
 
