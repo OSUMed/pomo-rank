@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Period } from "@/types";
+import { RANK_TIERS } from "@/lib/rank";
 
 type Project = { id: string; name: string };
 
@@ -74,6 +75,7 @@ export function StatsApp({ username }: { username: string }) {
   const [comparisonsOpen, setComparisonsOpen] = useState(false);
   const [trendOpen, setTrendOpen] = useState(true);
   const [projectsOpen, setProjectsOpen] = useState(true);
+  const [rankModalOpen, setRankModalOpen] = useState(false);
 
   useEffect(() => {
     void (async () => {
@@ -139,7 +141,7 @@ export function StatsApp({ username }: { username: string }) {
 
   return (
     <main className="app-shell stats-shell">
-      <section className="timer-card stats-card">
+      <section className="timer-card stats-card stats-page-card">
         <header className="heading-block">
           <div className="header-row">
             <div>
@@ -249,11 +251,14 @@ export function StatsApp({ username }: { username: string }) {
               <p>Avg / day</p>
               <h2>{stats?.averageMinutes ?? 0} min</h2>
             </article>
-            <Link className="metric-card rank-card rank-card-action metric-card--full" href={`/rank?projectId=${projectId}`}>
+            <button
+              className="metric-card rank-card rank-card--muted rank-card-action metric-card--full"
+              onClick={() => setRankModalOpen(true)}
+            >
               <p>Current Rank (7d avg) - tap to open ladder</p>
               <h2>{stats?.rank.title ?? "Mortal"}</h2>
               <span>{stats?.rank.subtitle ?? "The journey begins."}</span>
-            </Link>
+            </button>
           </section>
         </section>
 
@@ -405,6 +410,31 @@ export function StatsApp({ username }: { username: string }) {
                     </button>
                   ))
                 )}
+              </div>
+            </section>
+          </div>
+        ) : null}
+
+        {rankModalOpen ? (
+          <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Rank ladder">
+            <section className="side-panel">
+              <header className="modal-head">
+                <h2>Greek Rank Ladder</h2>
+                <button className="ghost" onClick={() => setRankModalOpen(false)}>
+                  Close
+                </button>
+              </header>
+              <p className="hint">Current rank: {stats?.rank.title ?? "Mortal"}</p>
+              <div className="rank-ladder rank-ladder--single">
+                {[...RANK_TIERS].reverse().map((tier) => (
+                  <article
+                    key={`stats-ladder-${tier.title}`}
+                    className={`rank-tier ${stats?.rank.title === tier.title ? "is-active rank-tier--muted-active" : ""}`}
+                  >
+                    <h3>{tier.title}</h3>
+                    <p>{tier.minMinutes}+ min/day avg</p>
+                  </article>
+                ))}
               </div>
             </section>
           </div>

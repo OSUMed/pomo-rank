@@ -910,8 +910,9 @@ export function DashboardApp({ username }: { username: string }) {
         </section>
 
         <section className="live-stats">
-          <article className="stat-chip">
+          <article className="stat-chip stat-chip--today">
             <p className="chip-label">Today</p>
+            <p className="chip-subvalue">Focus logged today</p>
             <p className="chip-value">{formatMinutesAsHours(summary?.todayMinutes ?? 0)}</p>
           </article>
           <article className="stat-chip">

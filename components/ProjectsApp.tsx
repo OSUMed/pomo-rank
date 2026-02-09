@@ -130,7 +130,7 @@ export function ProjectsApp({ username }: { username: string }) {
 
   return (
     <main className="app-shell stats-shell">
-      <section className="timer-card stats-card">
+      <section className="timer-card stats-card projects-page-card">
         <header className="heading-block">
           <div className="header-row">
             <div>
