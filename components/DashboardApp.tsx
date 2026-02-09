@@ -39,6 +39,7 @@ type OuraMetrics = {
 
 const SETTINGS_KEY = "pulseSessionSettingsV1";
 const LAST_RANK_KEY = "pulseLastAllRankTitle";
+const TIMER_STATE_KEY = "pulseTimerStateV1";
 const OURA_POLL_INTERVAL_MS = 60 * 1000;
 const FOCUS_WINDOW_MS = 5 * 60 * 1000;
 const DEFAULT_PROJECT_COLOR = "#2b5d8b";
@@ -49,6 +50,19 @@ type RankChangeState = {
   from: string;
   to: string;
 } | null;
+
+type TimerSnapshot = {
+  mode: Mode;
+  remaining: number;
+  running: boolean;
+  cycle: number;
+  longEvery: number;
+  lastUpdatedAt: string;
+  focusSessionStartedAt: string | null;
+  focusSeconds: number;
+  shortBreakSeconds: number;
+  longBreakSeconds: number;
+};
 
 const MODES: Record<Mode, { label: string; color: string; duration: number }> = {
   focus: { label: "Focus time", color: "#ff5d47", duration: 25 * 60 },
@@ -162,6 +176,49 @@ function projectDotColor(project?: Project | null) {
   return project?.color || UNSELECTED_PROJECT_DOT;
 }
 
+function nextTimerStep(mode: Mode, cycle: number, longEvery: number) {
+  if (mode === "focus") {
+    return { mode: cycle % longEvery === 0 ? ("longBreak" as Mode) : ("shortBreak" as Mode), cycle };
+  }
+  if (mode === "longBreak") {
+    return { mode: "focus" as Mode, cycle: 1 };
+  }
+  return { mode: "focus" as Mode, cycle: cycle + 1 };
+}
+
+function replayTimer(
+  snapshot: TimerSnapshot,
+  elapsedSeconds: number,
+): { mode: Mode; cycle: number; remaining: number; focusSecondsElapsed: number } {
+  const durations = {
+    focus: Math.max(1, Math.floor(snapshot.focusSeconds || MODES.focus.duration)),
+    shortBreak: Math.max(1, Math.floor(snapshot.shortBreakSeconds || MODES.shortBreak.duration)),
+    longBreak: Math.max(1, Math.floor(snapshot.longBreakSeconds || MODES.longBreak.duration)),
+  } as const;
+
+  let mode = snapshot.mode;
+  let cycle = snapshot.cycle;
+  let remaining = Math.max(1, Math.floor(snapshot.remaining));
+  let left = Math.max(0, Math.floor(elapsedSeconds));
+  let focusSecondsElapsed = 0;
+
+  while (left > 0) {
+    const step = Math.min(left, remaining);
+    if (mode === "focus") focusSecondsElapsed += step;
+    left -= step;
+    remaining -= step;
+
+    if (remaining <= 0) {
+      const next = nextTimerStep(mode, cycle, snapshot.longEvery);
+      mode = next.mode;
+      cycle = next.cycle;
+      remaining = durations[mode];
+    }
+  }
+
+  return { mode, cycle, remaining: Math.max(1, remaining), focusSecondsElapsed };
+}
+
 export function DashboardApp({ username }: { username: string }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<string>("all");
@@ -203,6 +260,8 @@ export function DashboardApp({ username }: { username: string }) {
   const rollingCountRef = useRef(0);
   const alertWindowsRef = useRef(0);
   const nextRecoveryAlertAtRef = useRef(0);
+  const timerHydratedRef = useRef(false);
+  const timerRestoredRef = useRef(false);
 
   const durations = useMemo(
     () => ({ focus: focusMinutes * 60, shortBreak: shortMinutes * 60, longBreak: longMinutes * 60 }),
@@ -239,8 +298,78 @@ export function DashboardApp({ username }: { username: string }) {
   }, []);
 
   useEffect(() => {
-    setRemaining(durations[mode]);
-  }, [durations, mode]);
+    if (timerRestoredRef.current) return;
+    timerRestoredRef.current = true;
+
+    try {
+      const raw = localStorage.getItem(TIMER_STATE_KEY);
+      if (!raw) {
+        timerHydratedRef.current = true;
+        return;
+      }
+      const saved = JSON.parse(raw) as Partial<TimerSnapshot>;
+      if (!saved.mode || !saved.lastUpdatedAt) {
+        timerHydratedRef.current = true;
+        return;
+      }
+
+      const base: TimerSnapshot = {
+        mode: saved.mode as Mode,
+        remaining: Math.max(1, Math.floor(Number(saved.remaining) || MODES.focus.duration)),
+        running: Boolean(saved.running),
+        cycle: Math.max(1, Math.floor(Number(saved.cycle) || 1)),
+        longEvery: Math.min(8, Math.max(2, Math.floor(Number(saved.longEvery) || longEvery))),
+        lastUpdatedAt: String(saved.lastUpdatedAt),
+        focusSessionStartedAt: typeof saved.focusSessionStartedAt === "string" ? saved.focusSessionStartedAt : null,
+        focusSeconds: Math.max(1, Math.floor(Number(saved.focusSeconds) || durations.focus)),
+        shortBreakSeconds: Math.max(1, Math.floor(Number(saved.shortBreakSeconds) || durations.shortBreak)),
+        longBreakSeconds: Math.max(1, Math.floor(Number(saved.longBreakSeconds) || durations.longBreak)),
+      };
+
+      let nextMode = base.mode;
+      let nextCycle = base.cycle;
+      let nextRemaining = base.remaining;
+      let recoveredFocusSeconds = 0;
+
+      if (base.running) {
+        const elapsed = Math.max(0, Math.floor((Date.now() - new Date(base.lastUpdatedAt).getTime()) / 1000));
+        const replayed = replayTimer(base, elapsed);
+        nextMode = replayed.mode;
+        nextCycle = replayed.cycle;
+        nextRemaining = replayed.remaining;
+        recoveredFocusSeconds = replayed.focusSecondsElapsed;
+      }
+
+      if (recoveredFocusSeconds > 0) pendingSecondsRef.current += recoveredFocusSeconds;
+      setLongEvery(base.longEvery);
+      setMode(nextMode);
+      setCycle(nextCycle);
+      setRemaining(nextRemaining);
+      setRunning(base.running);
+      focusSessionStartedAtRef.current = base.running && nextMode === "focus" ? base.focusSessionStartedAt : null;
+    } catch {
+      // ignore malformed timer snapshots
+    } finally {
+      timerHydratedRef.current = true;
+    }
+  }, [durations.focus, durations.shortBreak, durations.longBreak, longEvery]);
+
+  useEffect(() => {
+    if (!timerHydratedRef.current) return;
+    const snapshot: TimerSnapshot = {
+      mode,
+      remaining,
+      running,
+      cycle,
+      longEvery,
+      lastUpdatedAt: new Date().toISOString(),
+      focusSessionStartedAt: focusSessionStartedAtRef.current,
+      focusSeconds: durations.focus,
+      shortBreakSeconds: durations.shortBreak,
+      longBreakSeconds: durations.longBreak,
+    };
+    localStorage.setItem(TIMER_STATE_KEY, JSON.stringify(snapshot));
+  }, [mode, remaining, running, cycle, longEvery, durations.focus, durations.shortBreak, durations.longBreak]);
 
   useEffect(() => {
     void loadSummary(projectId);
@@ -312,7 +441,7 @@ export function DashboardApp({ username }: { username: string }) {
   useEffect(() => {
     const isFocusRunning = running && mode === "focus";
     if (isFocusRunning && !previousFocusRunningRef.current) {
-      const startedAt = new Date().toISOString();
+      const startedAt = focusSessionStartedAtRef.current ?? new Date().toISOString();
       focusSessionStartedAtRef.current = startedAt;
       setSessionBaselineBpm(null);
       setRollingAvgBpm(null);
@@ -693,7 +822,9 @@ export function DashboardApp({ username }: { username: string }) {
             className="ghost"
             onClick={async () => {
               await flushPendingSeconds(projectId);
-              setMode(mode === "focus" ? "shortBreak" : "focus");
+              const nextMode: Mode = mode === "focus" ? "shortBreak" : "focus";
+              setMode(nextMode);
+              setRemaining(durations[nextMode]);
             }}
           >
             Skip
