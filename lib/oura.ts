@@ -5,7 +5,10 @@ const OURA_AUTH_URL = "https://cloud.ouraring.com/oauth/authorize";
 const OURA_TOKEN_URL = "https://api.ouraring.com/oauth/token";
 const OURA_API_BASE = "https://api.ouraring.com";
 const TOKEN_EXPIRY_BUFFER_MS = 90 * 1000;
-const MAX_HEARTRATE_WINDOW_MS = 60 * 60 * 1000;
+const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+const FOCUS_PADDING_MS = 2 * 60 * 60 * 1000;
+const MAX_PAGES = 25;
 const refreshLocks = new Map<string, Promise<string>>();
 
 type OuraConnectionRow = {
@@ -23,6 +26,11 @@ type OuraTokenResponse = {
   refresh_token: string;
   expires_in: number;
   scope?: string;
+};
+
+type OuraCollectionResponse<T> = {
+  data?: T[];
+  next_token?: string | null;
 };
 
 type OuraFocusProfileRow = {
@@ -62,6 +70,16 @@ export type OuraBiofeedback = {
   warning: string | null;
 };
 
+export type OuraScopeDebug = {
+  connected: boolean;
+  storedScope: string | null;
+  grantedScopes: string[];
+  requiredScopes: string[];
+  missingScopes: string[];
+  expiresAt: string | null;
+  tokenType: string | null;
+};
+
 export type FocusTelemetryInput = {
   sessionStartedAt: string;
   sessionEndedAt: string;
@@ -87,6 +105,12 @@ export function isOuraConfigured() {
   return Boolean(env.ouraClientId && env.ouraClientSecret && env.ouraRedirectUri);
 }
 
+function isOuraDebugEnabled(explicit?: boolean) {
+  if (explicit) return true;
+  const raw = (process.env.OURA_DEBUG_LOGS || "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
 export function getOuraAuthorizeUrl(state: string) {
   const { clientId, redirectUri } = requireOuraConfig();
   const params = new URLSearchParams({
@@ -109,6 +133,38 @@ export async function getOuraConnection(userId: string) {
 
   if (error) throw error;
   return data;
+}
+
+export async function getOuraScopeDebug(userId: string): Promise<OuraScopeDebug> {
+  const conn = await getOuraConnection(userId);
+  if (!conn) {
+    return {
+      connected: false,
+      storedScope: null,
+      grantedScopes: [],
+      requiredScopes: ["heartrate", "daily"],
+      missingScopes: ["heartrate", "daily"],
+      expiresAt: null,
+      tokenType: null,
+    };
+  }
+
+  const grantedScopes = (conn.scope || "")
+    .split(/\s+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const requiredScopes = ["heartrate", "daily"];
+  const missingScopes = requiredScopes.filter((scope) => !grantedScopes.includes(scope));
+
+  return {
+    connected: true,
+    storedScope: conn.scope,
+    grantedScopes,
+    requiredScopes,
+    missingScopes,
+    expiresAt: conn.expires_at || null,
+    tokenType: conn.token_type || null,
+  };
 }
 
 async function saveToken(userId: string, token: OuraTokenResponse) {
@@ -227,19 +283,56 @@ async function getValidAccessToken(userId: string) {
   return refreshAccessToken(userId, conn.refresh_token);
 }
 
-async function fetchOuraCollection<T>(path: string, token: string, params: URLSearchParams) {
-  const res = await fetch(`${OURA_API_BASE}${path}?${params.toString()}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
+async function fetchOuraCollectionPaginated<T>(
+  path: string,
+  token: string,
+  params: URLSearchParams,
+  options?: { debug?: boolean; label?: string },
+) {
+  const all: T[] = [];
+  let nextToken: string | null = null;
+  let page = 0;
+  const debug = isOuraDebugEnabled(options?.debug);
+  const label = options?.label || path;
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Oura collection request failed for ${path}: ${res.status} ${text}`);
-  }
+  do {
+    page += 1;
+    const pageParams = new URLSearchParams(params.toString());
+    if (nextToken) pageParams.set("next_token", nextToken);
+    const url = `${OURA_API_BASE}${path}?${pageParams.toString()}`;
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
 
-  return (await res.json()) as { data?: T[] };
+    if (debug) {
+      console.info("[OURA_DEBUG] request", { label, url, page });
+      console.info("[OURA_DEBUG] response", { label, status: res.status });
+    }
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Oura collection request failed for ${path}: ${res.status} ${text}`);
+    }
+
+    const payload = (await res.json()) as OuraCollectionResponse<T>;
+    const chunk = payload.data ?? [];
+    all.push(...chunk);
+    nextToken = payload.next_token || null;
+
+    if (debug) {
+      console.info("[OURA_DEBUG] page_data", {
+        label,
+        page,
+        documents: chunk.length,
+        total: all.length,
+        nextTokenPresent: Boolean(nextToken),
+      });
+    }
+  } while (nextToken && page < MAX_PAGES);
+
+  return { data: all };
 }
 
 function toIsoDate(date: Date) {
@@ -253,6 +346,27 @@ function asNumber(value: unknown) {
     if (Number.isFinite(parsed)) return parsed;
   }
   return null;
+}
+
+function extractTimestamp(row: Record<string, unknown>) {
+  const candidate =
+    (typeof row.timestamp === "string" && row.timestamp) ||
+    (typeof row.datetime === "string" && row.datetime) ||
+    (typeof row.ts === "string" && row.ts) ||
+    "";
+  return candidate || null;
+}
+
+function extractBpm(row: Record<string, unknown>) {
+  return asNumber(row.bpm) ?? asNumber(row.heart_rate) ?? asNumber(row.hr);
+}
+
+function minMaxTimestamp(samples: OuraHeartRateSample[]) {
+  if (!samples.length) return { min: null, max: null };
+  return {
+    min: samples[0].timestamp,
+    max: samples[samples.length - 1].timestamp,
+  };
 }
 
 function toHours(minutes: number | null | undefined) {
@@ -346,7 +460,64 @@ function parseFocusStart(input: string | null | undefined) {
   return date;
 }
 
-export async function getOuraBiofeedback(userId: string, focusStartInput?: string | null): Promise<OuraBiofeedback> {
+async function fetchHeartRateWithFallback(
+  token: string,
+  focusStart: Date | null,
+  debug?: boolean,
+) {
+  const now = new Date();
+  const start24 = new Date(now.getTime() - TWENTY_FOUR_HOURS_MS);
+  const focusBufferedStart = focusStart ? new Date(focusStart.getTime() - FOCUS_PADDING_MS) : null;
+  const primaryStart = focusBufferedStart && focusBufferedStart < start24 ? focusBufferedStart : start24;
+
+  const primaryParams = new URLSearchParams({
+    start_datetime: primaryStart.toISOString(),
+    end_datetime: now.toISOString(),
+  });
+
+  if (isOuraDebugEnabled(debug)) {
+    console.info("[OURA_DEBUG] heartrate_window_primary", {
+      start_datetime: primaryParams.get("start_datetime"),
+      end_datetime: primaryParams.get("end_datetime"),
+      focusStart: focusStart?.toISOString() ?? null,
+    });
+  }
+
+  const primary = await fetchOuraCollectionPaginated<Record<string, unknown>>(
+    "/v2/usercollection/heartrate",
+    token,
+    primaryParams,
+    { debug, label: "heartrate_primary" },
+  );
+
+  if ((primary.data?.length ?? 0) > 0) return primary;
+
+  const fallbackStart = new Date(now.getTime() - SEVEN_DAYS_MS);
+  const fallbackParams = new URLSearchParams({
+    start_datetime: fallbackStart.toISOString(),
+    end_datetime: now.toISOString(),
+  });
+
+  if (isOuraDebugEnabled(debug)) {
+    console.info("[OURA_DEBUG] heartrate_window_fallback", {
+      start_datetime: fallbackParams.get("start_datetime"),
+      end_datetime: fallbackParams.get("end_datetime"),
+    });
+  }
+
+  return fetchOuraCollectionPaginated<Record<string, unknown>>(
+    "/v2/usercollection/heartrate",
+    token,
+    fallbackParams,
+    { debug, label: "heartrate_fallback" },
+  );
+}
+
+export async function getOuraBiofeedback(
+  userId: string,
+  focusStartInput?: string | null,
+  options?: { debug?: boolean },
+): Promise<OuraBiofeedback> {
   let token: string | null = null;
   try {
     token = await getValidAccessToken(userId);
@@ -380,31 +551,24 @@ export async function getOuraBiofeedback(userId: string, focusStartInput?: strin
     };
   }
 
-  const now = new Date();
   const parsedFocusStart = parseFocusStart(focusStartInput);
-  const requestedStart = parsedFocusStart ?? new Date(now.getTime() - 30 * 60 * 1000);
-  const start = new Date(Math.max(requestedStart.getTime(), now.getTime() - MAX_HEARTRATE_WINDOW_MS));
+  const now = new Date();
+  const debug = options?.debug;
 
   const [profile, heartRateResult, stressResult] = await Promise.all([
     getFocusProfile(userId),
-    fetchOuraCollection<Record<string, unknown>>(
-      "/v2/usercollection/heartrate",
-      token,
-      new URLSearchParams({
-        start_datetime: start.toISOString(),
-        end_datetime: now.toISOString(),
-      }),
-    ).catch((error) => {
+    fetchHeartRateWithFallback(token, parsedFocusStart, debug).catch((error) => {
       console.error("Oura heartrate fetch failed", error);
       return { data: [] as Record<string, unknown>[] };
     }),
-    fetchOuraCollection<Record<string, unknown>>(
+    fetchOuraCollectionPaginated<Record<string, unknown>>(
       "/v2/usercollection/daily_stress",
       token,
       new URLSearchParams({
         start_date: toIsoDate(now),
         end_date: toIsoDate(now),
       }),
+      { debug, label: "daily_stress" },
     ).catch((error) => {
       console.error("Oura daily_stress fetch failed", error);
       return { data: [] as Record<string, unknown>[] };
@@ -413,13 +577,23 @@ export async function getOuraBiofeedback(userId: string, focusStartInput?: strin
 
   const samples = (heartRateResult.data ?? [])
     .map((row) => {
-      const bpm = asNumber(row.bpm);
-      const timestamp = String(row.timestamp ?? "");
+      const bpm = extractBpm(row);
+      const timestamp = extractTimestamp(row);
       if (!bpm || !timestamp) return null;
       return { timestamp, bpm };
     })
     .filter((row): row is OuraHeartRateSample => Boolean(row))
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+  if (isOuraDebugEnabled(debug)) {
+    const span = minMaxTimestamp(samples);
+    console.info("[OURA_DEBUG] heartrate_summary", {
+      documents: (heartRateResult.data ?? []).length,
+      mappedSamples: samples.length,
+      minTimestamp: span.min,
+      maxTimestamp: span.max,
+    });
+  }
 
   const latest = samples[samples.length - 1] ?? null;
   const stressRow = (stressResult.data ?? [])[0] ?? null;

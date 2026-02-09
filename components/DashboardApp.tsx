@@ -69,6 +69,13 @@ function formatMinutesAsHours(minutes: number) {
   return `${h} hr ${m}min`;
 }
 
+function formatTimestampLabel(value: string | null) {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
 function toDateInputValue(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
@@ -321,17 +328,14 @@ export function DashboardApp({ username }: { username: string }) {
       void persistFocusTelemetry();
       focusSessionStartedAtRef.current = null;
       setConsecutiveHighWindows(0);
-      setFocusSignal("steady");
     }
 
     previousFocusRunningRef.current = isFocusRunning;
   }, [running, mode]);
 
   useEffect(() => {
-    if (!(running && mode === "focus")) return;
-
     const tick = () => {
-      void loadOuraMetrics(focusSessionStartedAtRef.current);
+      void loadOuraMetrics(running && mode === "focus" ? focusSessionStartedAtRef.current : null);
     };
 
     tick();
@@ -340,16 +344,21 @@ export function DashboardApp({ username }: { username: string }) {
   }, [running, mode]);
 
   useEffect(() => {
-    if (!(running && mode === "focus")) return;
-    if (!ouraMetrics?.connected || !focusSessionStartedAtRef.current) return;
-
+    if (!ouraMetrics?.connected) return;
     const rolling = computeRollingFiveMinuteAvg(ouraMetrics.heartRateSamples);
     setRollingAvgBpm(rolling);
+    if (!rolling) {
+      setFocusSignal("steady");
+      return;
+    }
 
+    const isFocusRunning = running && mode === "focus" && Boolean(focusSessionStartedAtRef.current);
     const baselineNow =
-      sessionBaselineBpm ??
-      computeSessionStartBaseline(ouraMetrics.heartRateSamples, focusSessionStartedAtRef.current) ??
-      null;
+      (isFocusRunning && focusSessionStartedAtRef.current
+        ? sessionBaselineBpm ??
+          computeSessionStartBaseline(ouraMetrics.heartRateSamples, focusSessionStartedAtRef.current) ??
+          null
+        : null) ?? sessionBaselineBpm;
     if (baselineNow && !sessionBaselineBpm) setSessionBaselineBpm(baselineNow);
 
     const effectiveBaseline = baselineNow ?? ouraMetrics.profile.baselineMedianBpm ?? rolling;
@@ -359,6 +368,12 @@ export function DashboardApp({ username }: { username: string }) {
     const thresholdDelta = Math.max(6, drift + 2);
     const threshold = effectiveBaseline + thresholdDelta;
     const above = rolling > threshold;
+
+    if (!isFocusRunning) {
+      setConsecutiveHighWindows(0);
+      setFocusSignal(above ? "slow_down" : "steady");
+      return;
+    }
 
     if (above) {
       setConsecutiveHighWindows((prev) => {
@@ -506,6 +521,8 @@ export function DashboardApp({ username }: { username: string }) {
     : "Today: No stress data";
   const activeProject = projectId === "all" ? null : projects.find((p) => p.id === projectId) || null;
   const activeProjectName = activeProject?.name || "No Project";
+  const displayRollingAvgBpm = rollingAvgBpm ?? computeRollingFiveMinuteAvg(ouraMetrics?.heartRateSamples ?? []);
+  const displayBaselineBpm = sessionBaselineBpm ?? ouraMetrics?.profile.baselineMedianBpm ?? null;
   const timerAccentColor = mode === "focus" ? activeProject?.color || DEFAULT_PROJECT_COLOR : activeMode.color;
   const timerAccentRgb = timerAccentColor ? hexToRgb(timerAccentColor) : null;
   const timerCardStyle = timerAccentRgb
@@ -792,9 +809,9 @@ export function DashboardApp({ username }: { username: string }) {
                   </p>
                   <div className="bio-metrics-grid">
                     <span className="bio-metric-pill">Current HR: {ouraMetrics.latestHeartRate ?? "--"} bpm</span>
-                    <span className="bio-metric-pill">Rolling 5-min avg: {rollingAvgBpm ? Math.round(rollingAvgBpm) : "--"} bpm</span>
+                    <span className="bio-metric-pill">Rolling 5-min avg: {displayRollingAvgBpm ? Math.round(displayRollingAvgBpm) : "--"} bpm</span>
                     <span className="bio-metric-pill">
-                      Baseline: {sessionBaselineBpm ? Math.round(sessionBaselineBpm) : ouraMetrics.profile.baselineMedianBpm ?? "--"} bpm
+                      Baseline: {displayBaselineBpm ? Math.round(displayBaselineBpm) : "--"} bpm
                     </span>
                     <span className="bio-metric-pill">High windows: {consecutiveHighWindows}</span>
                   </div>
@@ -811,9 +828,9 @@ export function DashboardApp({ username }: { username: string }) {
                     <div className="bio-mobile-details">
                       <div className="bio-metrics-grid">
                         <span className="bio-metric-pill">Current HR: {ouraMetrics.latestHeartRate ?? "--"} bpm</span>
-                        <span className="bio-metric-pill">Rolling 5-min avg: {rollingAvgBpm ? Math.round(rollingAvgBpm) : "--"} bpm</span>
+                        <span className="bio-metric-pill">Rolling 5-min avg: {displayRollingAvgBpm ? Math.round(displayRollingAvgBpm) : "--"} bpm</span>
                         <span className="bio-metric-pill">
-                          Baseline: {sessionBaselineBpm ? Math.round(sessionBaselineBpm) : ouraMetrics.profile.baselineMedianBpm ?? "--"} bpm
+                          Baseline: {displayBaselineBpm ? Math.round(displayBaselineBpm) : "--"} bpm
                         </span>
                         <span className="bio-metric-pill">High windows: {consecutiveHighWindows}</span>
                       </div>
@@ -821,7 +838,13 @@ export function DashboardApp({ username }: { username: string }) {
                   ) : null}
                 </div>
                 {!ouraMetrics.heartRateSamples.length ? (
-                  <p className="chip-subvalue">No recent HR samples yet. Start a focus session while wearing Oura.</p>
+                  <p className="chip-subvalue">
+                    Waiting for Oura heart-rate samples (can be delayed). Press Start Focus, wear your ring, and sync Oura.
+                  </p>
+                ) : null}
+                <p className="chip-subvalue">Last HR sample: {formatTimestampLabel(ouraMetrics.latestHeartRateTime)}</p>
+                {!running || mode !== "focus" ? (
+                  <p className="chip-subvalue">Auto-pause nudges activate during Focus runs; live HR status works anytime.</p>
                 ) : null}
                 {ouraMetrics.stressToday ? (
                   <div className="stress-context">

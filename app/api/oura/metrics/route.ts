@@ -31,7 +31,9 @@ export async function GET(req: NextRequest) {
 
   try {
     const focusStart = req.nextUrl.searchParams.get("focusStart");
-    const metrics = await getOuraBiofeedback(session.userId, focusStart);
+    const debugRaw = (req.nextUrl.searchParams.get("debug") || "").toLowerCase();
+    const debug = debugRaw === "1" || debugRaw === "true" || debugRaw === "yes";
+    const metrics = await getOuraBiofeedback(session.userId, focusStart, { debug });
     return NextResponse.json({
       configured: true,
       missing: [],
