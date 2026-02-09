@@ -17,10 +17,21 @@ type OuraMetrics = {
   configured: boolean;
   missing?: string[];
   connected: boolean;
-  heartRate: number | null;
-  heartRateTime: string | null;
-  stressState: string | null;
-  stressDate: string | null;
+  heartRateSamples: Array<{ timestamp: string; bpm: number }>;
+  latestHeartRate: number | null;
+  latestHeartRateTime: string | null;
+  stressToday: {
+    date: string | null;
+    stressedHours: number;
+    engagedHours: number;
+    relaxedHours: number;
+    restoredHours: number;
+  } | null;
+  profile: {
+    baselineMedianBpm: number | null;
+    typicalDriftBpm: number | null;
+    sampleCount: number;
+  };
   warning?: string | null;
 };
 
@@ -64,15 +75,6 @@ function loadSettings(): SessionSettings {
 
 function saveSettings(settings: SessionSettings) {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-}
-
-function stressTone(state: string | null | undefined) {
-  const normalized = String(state || "").toLowerCase();
-  if (normalized.includes("restore")) return "tone-restored";
-  if (normalized.includes("relax")) return "tone-relaxed";
-  if (normalized.includes("engag")) return "tone-engaged";
-  if (normalized.includes("stress")) return "tone-stressed";
-  return "tone-neutral";
 }
 
 export function SettingsApp({ username }: { username: string }) {
@@ -247,14 +249,12 @@ export function SettingsApp({ username }: { username: string }) {
                 <p className="chip-subvalue">Connected. Oura login + consent is required once to sync data.</p>
                 <div className="oura-stats-grid">
                   <article className="stat-chip">
-                    <p className="chip-label">Current Heart Rate</p>
-                    <p className="chip-value">{ouraMetrics.heartRate ?? "--"} bpm</p>
+                    <p className="chip-label">Biofeedback Baseline</p>
+                    <p className="chip-value">{ouraMetrics.profile.baselineMedianBpm ?? "--"} bpm</p>
                   </article>
                   <article className="stat-chip">
-                    <p className="chip-label">Current Stress State</p>
-                    <p className={`state-pill ${stressTone(ouraMetrics.stressState)}`}>
-                      {ouraMetrics.stressState ?? "--"}
-                    </p>
+                    <p className="chip-label">Profile Samples</p>
+                    <p className="chip-value">{ouraMetrics.profile.sampleCount}</p>
                   </article>
                 </div>
                 <div className="control-row">

@@ -5,6 +5,7 @@ const OURA_AUTH_URL = "https://cloud.ouraring.com/oauth/authorize";
 const OURA_TOKEN_URL = "https://api.ouraring.com/oauth/token";
 const OURA_API_BASE = "https://api.ouraring.com";
 const TOKEN_EXPIRY_BUFFER_MS = 90 * 1000;
+const MAX_HEARTRATE_WINDOW_MS = 60 * 60 * 1000;
 const refreshLocks = new Map<string, Promise<string>>();
 
 type OuraConnectionRow = {
@@ -22,6 +23,52 @@ type OuraTokenResponse = {
   refresh_token: string;
   expires_in: number;
   scope?: string;
+};
+
+type OuraFocusProfileRow = {
+  user_id: string;
+  baseline_median_bpm: number;
+  typical_drift_bpm: number;
+  sample_count: number;
+  updated_at: string;
+};
+
+export type OuraFocusProfile = {
+  baselineMedianBpm: number | null;
+  typicalDriftBpm: number | null;
+  sampleCount: number;
+};
+
+export type OuraHeartRateSample = {
+  timestamp: string;
+  bpm: number;
+};
+
+export type OuraStressBuckets = {
+  date: string | null;
+  stressedHours: number;
+  engagedHours: number;
+  relaxedHours: number;
+  restoredHours: number;
+};
+
+export type OuraBiofeedback = {
+  connected: boolean;
+  heartRateSamples: OuraHeartRateSample[];
+  latestHeartRate: number | null;
+  latestHeartRateTime: string | null;
+  stressToday: OuraStressBuckets | null;
+  profile: OuraFocusProfile;
+  warning: string | null;
+};
+
+export type FocusTelemetryInput = {
+  sessionStartedAt: string;
+  sessionEndedAt: string;
+  baselineBpm: number;
+  peakRollingBpm: number;
+  avgRollingBpm: number;
+  alertWindows: number;
 };
 
 function requireOuraConfig() {
@@ -139,8 +186,6 @@ async function refreshAccessToken(userId: string, refreshToken: string) {
       await saveToken(userId, token);
       return token.access_token;
     } catch (error) {
-      // Oura refresh tokens are single-use. If another request already rotated
-      // the token, reuse the newly stored access token instead of hard-failing.
       const message = String(error);
       if (message.includes("invalid_grant")) {
         const latest = await getOuraConnection(userId);
@@ -171,7 +216,11 @@ async function getValidAccessToken(userId: string) {
   if (!conn) return null;
 
   const expiresAtMs = new Date(conn.expires_at).getTime();
-  if (Number.isFinite(expiresAtMs) && expiresAtMs - TOKEN_EXPIRY_BUFFER_MS > Date.now()) {
+  if (!Number.isFinite(expiresAtMs)) {
+    return conn.access_token;
+  }
+
+  if (expiresAtMs - TOKEN_EXPIRY_BUFFER_MS > Date.now()) {
     return conn.access_token;
   }
 
@@ -206,6 +255,47 @@ function asNumber(value: unknown) {
   return null;
 }
 
+function toHours(minutes: number | null | undefined) {
+  if (!minutes || minutes <= 0) return 0;
+  return Math.round((minutes / 60) * 10) / 10;
+}
+
+function defaultProfile(): OuraFocusProfile {
+  return {
+    baselineMedianBpm: null,
+    typicalDriftBpm: null,
+    sampleCount: 0,
+  };
+}
+
+function hasMissingTable(error: unknown, tableName: string) {
+  if (!error || typeof error !== "object") return false;
+  const code = (error as { code?: string }).code;
+  const message = String((error as { message?: string }).message || "");
+  return code === "42P01" || message.includes(tableName);
+}
+
+async function getFocusProfile(userId: string): Promise<OuraFocusProfile> {
+  const { data, error } = await supabase
+    .from("oura_focus_profiles")
+    .select("user_id, baseline_median_bpm, typical_drift_bpm, sample_count, updated_at")
+    .eq("user_id", userId)
+    .maybeSingle<OuraFocusProfileRow>();
+
+  if (error) {
+    if (hasMissingTable(error, "oura_focus_profiles")) return defaultProfile();
+    throw error;
+  }
+
+  if (!data) return defaultProfile();
+
+  return {
+    baselineMedianBpm: Number(data.baseline_median_bpm) || null,
+    typicalDriftBpm: Number(data.typical_drift_bpm) || null,
+    sampleCount: Number(data.sample_count) || 0,
+  };
+}
+
 function normalizeStressStateLabel(value: string) {
   const normalized = value.trim().toLowerCase();
   if (!normalized) return null;
@@ -216,20 +306,47 @@ function normalizeStressStateLabel(value: string) {
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 
-function pickStressState(row: Record<string, unknown>) {
-  const direct =
-    row.stress_state ??
-    row.state ??
-    row.level ??
-    row.status ??
-    row.category ??
-    row.resilience_level;
+function summarizeStressToday(row: Record<string, unknown> | null): OuraStressBuckets | null {
+  if (!row) return null;
 
-  if (typeof direct === "string") return normalizeStressStateLabel(direct);
-  return null;
+  const restoredMinutes = asNumber(row.restorative_minutes) ?? asNumber(row.recovery_minutes) ?? 0;
+  const relaxedMinutes = asNumber(row.low_stress_minutes) ?? asNumber(row.stress_low) ?? 0;
+  const engagedMinutes = asNumber(row.medium_stress_minutes) ?? asNumber(row.stress_medium) ?? 0;
+  const stressedMinutes = asNumber(row.high_stress_minutes) ?? asNumber(row.stress_high) ?? 0;
+
+  const directState =
+    (typeof row.stress_state === "string" ? normalizeStressStateLabel(row.stress_state) : null) ||
+    (typeof row.state === "string" ? normalizeStressStateLabel(row.state) : null);
+
+  if (directState) {
+    if (directState === "Stressed" && stressedMinutes === 0) {
+      return {
+        date: String(row.day ?? row.date ?? "") || null,
+        stressedHours: 0.1,
+        engagedHours: toHours(engagedMinutes),
+        relaxedHours: toHours(relaxedMinutes),
+        restoredHours: toHours(restoredMinutes),
+      };
+    }
+  }
+
+  return {
+    date: String(row.day ?? row.date ?? "") || null,
+    stressedHours: toHours(stressedMinutes),
+    engagedHours: toHours(engagedMinutes),
+    relaxedHours: toHours(relaxedMinutes),
+    restoredHours: toHours(restoredMinutes),
+  };
 }
 
-export async function getOuraMetrics(userId: string) {
+function parseFocusStart(input: string | null | undefined) {
+  if (!input) return null;
+  const date = new Date(input);
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
+export async function getOuraBiofeedback(userId: string, focusStartInput?: string | null): Promise<OuraBiofeedback> {
   let token: string | null = null;
   try {
     token = await getValidAccessToken(userId);
@@ -240,72 +357,142 @@ export async function getOuraMetrics(userId: string) {
     } catch (cleanupError) {
       console.error("Failed to cleanup invalid Oura connection", cleanupError);
     }
-    const detail =
-      process.env.NODE_ENV !== "production"
-        ? `Token refresh failed: ${String(error instanceof Error ? error.message : error).slice(0, 160)}`
-        : "Token refresh failed. Please reconnect Oura.";
     return {
       connected: false,
-      heartRate: null as number | null,
-      heartRateTime: null as string | null,
-      stressState: null as string | null,
-      stressDate: null as string | null,
-      warning: detail,
+      heartRateSamples: [],
+      latestHeartRate: null,
+      latestHeartRateTime: null,
+      stressToday: null,
+      profile: defaultProfile(),
+      warning: "Token refresh failed. Please reconnect Oura.",
     };
   }
 
   if (!token) {
     return {
       connected: false,
-      heartRate: null as number | null,
-      heartRateTime: null as string | null,
-      stressState: null as string | null,
-      stressDate: null as string | null,
-      warning: null as string | null,
+      heartRateSamples: [],
+      latestHeartRate: null,
+      latestHeartRateTime: null,
+      stressToday: null,
+      profile: defaultProfile(),
+      warning: null,
     };
   }
 
-  const end = new Date();
-  const start = new Date(end.getTime() - 12 * 60 * 60 * 1000);
-  let latestHeart: Record<string, unknown> | null = null;
-  let latestStress: Record<string, unknown> | null = null;
+  const now = new Date();
+  const parsedFocusStart = parseFocusStart(focusStartInput);
+  const requestedStart = parsedFocusStart ?? new Date(now.getTime() - 30 * 60 * 1000);
+  const start = new Date(Math.max(requestedStart.getTime(), now.getTime() - MAX_HEARTRATE_WINDOW_MS));
 
-  try {
-    const heartRatePayload = await fetchOuraCollection<Record<string, unknown>>(
+  const [profile, heartRateResult, stressResult] = await Promise.all([
+    getFocusProfile(userId),
+    fetchOuraCollection<Record<string, unknown>>(
       "/v2/usercollection/heartrate",
       token,
       new URLSearchParams({
         start_datetime: start.toISOString(),
-        end_datetime: end.toISOString(),
+        end_datetime: now.toISOString(),
       }),
-    );
-    const heartRows = heartRatePayload.data ?? [];
-    latestHeart = heartRows[heartRows.length - 1] ?? null;
-  } catch (error) {
-    console.error("Oura heartrate fetch failed", error);
-  }
-
-  try {
-    const stressPayload = await fetchOuraCollection<Record<string, unknown>>(
+    ).catch((error) => {
+      console.error("Oura heartrate fetch failed", error);
+      return { data: [] as Record<string, unknown>[] };
+    }),
+    fetchOuraCollection<Record<string, unknown>>(
       "/v2/usercollection/daily_stress",
       token,
       new URLSearchParams({
-        start_date: toIsoDate(new Date(end.getTime() - 14 * 24 * 60 * 60 * 1000)),
-        end_date: toIsoDate(end),
+        start_date: toIsoDate(now),
+        end_date: toIsoDate(now),
       }),
-    );
-    const stressRows = stressPayload.data ?? [];
-    latestStress = stressRows[stressRows.length - 1] ?? null;
-  } catch (error) {
-    console.error("Oura daily_stress fetch failed", error);
-  }
+    ).catch((error) => {
+      console.error("Oura daily_stress fetch failed", error);
+      return { data: [] as Record<string, unknown>[] };
+    }),
+  ]);
+
+  const samples = (heartRateResult.data ?? [])
+    .map((row) => {
+      const bpm = asNumber(row.bpm);
+      const timestamp = String(row.timestamp ?? "");
+      if (!bpm || !timestamp) return null;
+      return { timestamp, bpm };
+    })
+    .filter((row): row is OuraHeartRateSample => Boolean(row))
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+  const latest = samples[samples.length - 1] ?? null;
+  const stressRow = (stressResult.data ?? [])[0] ?? null;
 
   return {
     connected: true,
-    heartRate: latestHeart ? asNumber(latestHeart.bpm) : null,
-    heartRateTime: latestHeart ? String(latestHeart.timestamp ?? "") || null : null,
-    stressState: latestStress ? pickStressState(latestStress) : null,
-    stressDate: latestStress ? String(latestStress.day ?? latestStress.date ?? "") || null : null,
-    warning: null as string | null,
+    heartRateSamples: samples,
+    latestHeartRate: latest?.bpm ?? null,
+    latestHeartRateTime: latest?.timestamp ?? null,
+    stressToday: summarizeStressToday(stressRow),
+    profile,
+    warning: null,
+  };
+}
+
+export async function saveFocusTelemetry(userId: string, input: FocusTelemetryInput) {
+  const baseline = Math.max(30, Math.min(220, Number(input.baselineBpm) || 0));
+  const peak = Math.max(30, Math.min(220, Number(input.peakRollingBpm) || 0));
+  const average = Math.max(30, Math.min(220, Number(input.avgRollingBpm) || 0));
+  const alerts = Math.max(0, Math.floor(Number(input.alertWindows) || 0));
+
+  if (!baseline || !peak || !average) {
+    throw new Error("Invalid focus telemetry payload");
+  }
+
+  const startedAt = new Date(input.sessionStartedAt);
+  const endedAt = new Date(input.sessionEndedAt);
+  if (Number.isNaN(startedAt.getTime()) || Number.isNaN(endedAt.getTime())) {
+    throw new Error("Invalid session timestamps");
+  }
+
+  const { error: telemetryError } = await supabase.from("oura_focus_telemetry").insert({
+    user_id: userId,
+    session_started_at: startedAt.toISOString(),
+    session_ended_at: endedAt.toISOString(),
+    baseline_bpm: baseline,
+    peak_rolling_bpm: peak,
+    avg_rolling_bpm: average,
+    alert_windows: alerts,
+  });
+
+  if (telemetryError && !hasMissingTable(telemetryError, "oura_focus_telemetry")) {
+    throw telemetryError;
+  }
+
+  const existing = await getFocusProfile(userId);
+  const sessionDrift = Math.max(0, peak - baseline);
+
+  const existingBaseline = existing.baselineMedianBpm ?? baseline;
+  const existingDrift = existing.typicalDriftBpm ?? Math.max(6, sessionDrift);
+  const weight = existing.sampleCount > 0 ? 0.2 : 1;
+
+  const nextBaseline = Math.round((existingBaseline * (1 - weight) + baseline * weight) * 10) / 10;
+  const nextDrift = Math.round((existingDrift * (1 - weight) + sessionDrift * weight) * 10) / 10;
+
+  const { error: profileError } = await supabase.from("oura_focus_profiles").upsert(
+    {
+      user_id: userId,
+      baseline_median_bpm: nextBaseline,
+      typical_drift_bpm: Math.max(4, nextDrift),
+      sample_count: existing.sampleCount + 1,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "user_id" },
+  );
+
+  if (profileError && !hasMissingTable(profileError, "oura_focus_profiles")) {
+    throw profileError;
+  }
+
+  return {
+    baselineMedianBpm: nextBaseline,
+    typicalDriftBpm: Math.max(4, nextDrift),
+    sampleCount: existing.sampleCount + 1,
   };
 }

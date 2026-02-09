@@ -4,7 +4,7 @@ import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { RANK_TIERS } from "@/lib/rank";
 
-type Project = { id: string; name: string };
+type Project = { id: string; name: string; color: string | null };
 type Mode = "focus" | "shortBreak" | "longBreak";
 type QuickDateMode = "today" | "yesterday" | "custom";
 
@@ -19,15 +19,30 @@ type DashboardSummary = {
 type OuraMetrics = {
   configured: boolean;
   connected: boolean;
-  heartRate: number | null;
-  heartRateTime: string | null;
-  stressState: string | null;
-  stressDate: string | null;
+  heartRateSamples: Array<{ timestamp: string; bpm: number }>;
+  latestHeartRate: number | null;
+  latestHeartRateTime: string | null;
+  stressToday: {
+    date: string | null;
+    stressedHours: number;
+    engagedHours: number;
+    relaxedHours: number;
+    restoredHours: number;
+  } | null;
+  profile: {
+    baselineMedianBpm: number | null;
+    typicalDriftBpm: number | null;
+    sampleCount: number;
+  };
   warning?: string | null;
 };
 
 const SETTINGS_KEY = "pulseSessionSettingsV1";
 const LAST_RANK_KEY = "pulseLastAllRankTitle";
+const OURA_POLL_INTERVAL_MS = 60 * 1000;
+const FOCUS_WINDOW_MS = 5 * 60 * 1000;
+const DEFAULT_PROJECT_COLOR = "#2b5d8b";
+const UNSELECTED_PROJECT_DOT = "#9ca3af";
 
 type RankChangeState = {
   direction: "up" | "down";
@@ -50,7 +65,8 @@ function formatTime(seconds: number) {
 function formatMinutesAsHours(minutes: number) {
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
-  return `${h}h ${m}m`;
+  if (h <= 0) return `${m} min`;
+  return `${h} hr ${m}min`;
 }
 
 function toDateInputValue(date: Date) {
@@ -61,13 +77,44 @@ function todayDateInputValue() {
   return toDateInputValue(new Date());
 }
 
-function stressTone(state: string | null | undefined) {
-  const normalized = String(state || "").toLowerCase();
-  if (normalized.includes("restore")) return "tone-restored";
-  if (normalized.includes("relax")) return "tone-relaxed";
-  if (normalized.includes("engag")) return "tone-engaged";
-  if (normalized.includes("stress")) return "tone-stressed";
-  return "tone-neutral";
+type FocusSignal = "steady" | "slow_down" | "take_break";
+
+function signalTone(state: FocusSignal) {
+  if (state === "steady") return "tone-restored";
+  if (state === "slow_down") return "tone-engaged";
+  return "tone-stressed";
+}
+
+function toMillis(ts: string) {
+  const value = new Date(ts).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
+function average(values: number[]) {
+  if (!values.length) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function computeRollingFiveMinuteAvg(samples: Array<{ timestamp: string; bpm: number }>) {
+  if (!samples.length) return null;
+  const latestTs = toMillis(samples[samples.length - 1].timestamp);
+  const windowStart = latestTs - FOCUS_WINDOW_MS;
+  const values = samples.filter((sample) => toMillis(sample.timestamp) >= windowStart).map((sample) => sample.bpm);
+  return average(values);
+}
+
+function computeSessionStartBaseline(samples: Array<{ timestamp: string; bpm: number }>, startedAt: string) {
+  const startMs = toMillis(startedAt);
+  if (!startMs) return null;
+  const endMs = startMs + FOCUS_WINDOW_MS;
+  const values = samples
+    .filter((sample) => {
+      const ts = toMillis(sample.timestamp);
+      return ts >= startMs && ts <= endMs;
+    })
+    .map((sample) => sample.bpm);
+  if (values.length < 3) return null;
+  return average(values);
 }
 
 function yesterdayDateInputValue() {
@@ -76,17 +123,36 @@ function yesterdayDateInputValue() {
   return toDateInputValue(d);
 }
 
-function getBadgeStyles(key: string): CSSProperties {
-  let hash = 0;
-  for (let i = 0; i < key.length; i += 1) hash = (hash * 31 + key.charCodeAt(i)) % 360;
-  const hue = Math.abs(hash % 360);
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
 
+function hexToRgb(hex: string) {
+  const normalized = hex.trim().replace(/^#/, "");
+  if (!/^[0-9a-fA-F]{6}$/.test(normalized)) return null;
+  const value = Number.parseInt(normalized, 16);
   return {
-    "--badge-bg": `hsl(${hue} 92% 94%)`,
-    "--badge-border": `hsl(${hue} 60% 74%)`,
-    "--badge-text": `hsl(${hue} 50% 30%)`,
-    "--badge-active": `hsl(${hue} 75% 52%)`,
-  } as CSSProperties;
+    r: (value >> 16) & 255,
+    g: (value >> 8) & 255,
+    b: value & 255,
+  };
+}
+
+function shiftRgb(rgb: { r: number; g: number; b: number }, amount: number) {
+  return {
+    r: clamp(rgb.r + amount, 0, 255),
+    g: clamp(rgb.g + amount, 0, 255),
+    b: clamp(rgb.b + amount, 0, 255),
+  };
+}
+
+function rgbToCss(rgb: { r: number; g: number; b: number }, alpha = 1) {
+  if (alpha >= 1) return `rgb(${rgb.r} ${rgb.g} ${rgb.b})`;
+  return `rgb(${rgb.r} ${rgb.g} ${rgb.b} / ${alpha})`;
+}
+
+function projectDotColor(project?: Project | null) {
+  return project?.color || UNSELECTED_PROJECT_DOT;
 }
 
 export function DashboardApp({ username }: { username: string }) {
@@ -113,7 +179,23 @@ export function DashboardApp({ username }: { username: string }) {
   const [manualModalOpen, setManualModalOpen] = useState(false);
   const [rankModalOpen, setRankModalOpen] = useState(false);
   const [rankChange, setRankChange] = useState<RankChangeState>(null);
+  const [recoveryReason, setRecoveryReason] = useState<string | null>(null);
+  const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [mobileProjectPickerOpen, setMobileProjectPickerOpen] = useState(false);
+  const [bioDetailsOpen, setBioDetailsOpen] = useState(false);
+  const [focusSignal, setFocusSignal] = useState<FocusSignal>("steady");
+  const [rollingAvgBpm, setRollingAvgBpm] = useState<number | null>(null);
+  const [sessionBaselineBpm, setSessionBaselineBpm] = useState<number | null>(null);
+  const [consecutiveHighWindows, setConsecutiveHighWindows] = useState(0);
   const pendingSecondsRef = useRef(0);
+  const focusSessionStartedAtRef = useRef<string | null>(null);
+  const previousFocusRunningRef = useRef(false);
+  const peakRollingBpmRef = useRef<number | null>(null);
+  const rollingTotalRef = useRef(0);
+  const rollingCountRef = useRef(0);
+  const alertWindowsRef = useRef(0);
+  const nextRecoveryAlertAtRef = useRef(0);
 
   const durations = useMemo(
     () => ({ focus: focusMinutes * 60, shortBreak: shortMinutes * 60, longBreak: longMinutes * 60 }),
@@ -132,12 +214,6 @@ export function DashboardApp({ username }: { username: string }) {
 
   useEffect(() => {
     void loadOuraMetrics();
-
-    const timer = window.setInterval(() => {
-      void loadOuraMetrics();
-    }, 60000);
-
-    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -226,6 +302,89 @@ export function DashboardApp({ username }: { username: string }) {
     };
   }, [running, mode, cycle, longEvery, projectId, durations]);
 
+  useEffect(() => {
+    const isFocusRunning = running && mode === "focus";
+    if (isFocusRunning && !previousFocusRunningRef.current) {
+      const startedAt = new Date().toISOString();
+      focusSessionStartedAtRef.current = startedAt;
+      setSessionBaselineBpm(null);
+      setRollingAvgBpm(null);
+      setConsecutiveHighWindows(0);
+      setFocusSignal("steady");
+      peakRollingBpmRef.current = null;
+      rollingTotalRef.current = 0;
+      rollingCountRef.current = 0;
+      alertWindowsRef.current = 0;
+    }
+
+    if (!isFocusRunning && previousFocusRunningRef.current) {
+      void persistFocusTelemetry();
+      focusSessionStartedAtRef.current = null;
+      setConsecutiveHighWindows(0);
+      setFocusSignal("steady");
+    }
+
+    previousFocusRunningRef.current = isFocusRunning;
+  }, [running, mode]);
+
+  useEffect(() => {
+    if (!(running && mode === "focus")) return;
+
+    const tick = () => {
+      void loadOuraMetrics(focusSessionStartedAtRef.current);
+    };
+
+    tick();
+    const timer = window.setInterval(tick, OURA_POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [running, mode]);
+
+  useEffect(() => {
+    if (!(running && mode === "focus")) return;
+    if (!ouraMetrics?.connected || !focusSessionStartedAtRef.current) return;
+
+    const rolling = computeRollingFiveMinuteAvg(ouraMetrics.heartRateSamples);
+    setRollingAvgBpm(rolling);
+
+    const baselineNow =
+      sessionBaselineBpm ??
+      computeSessionStartBaseline(ouraMetrics.heartRateSamples, focusSessionStartedAtRef.current) ??
+      null;
+    if (baselineNow && !sessionBaselineBpm) setSessionBaselineBpm(baselineNow);
+
+    const effectiveBaseline = baselineNow ?? ouraMetrics.profile.baselineMedianBpm ?? rolling;
+    if (!effectiveBaseline || !rolling) return;
+
+    const drift = ouraMetrics.profile.typicalDriftBpm ?? 8;
+    const thresholdDelta = Math.max(6, drift + 2);
+    const threshold = effectiveBaseline + thresholdDelta;
+    const above = rolling > threshold;
+
+    if (above) {
+      setConsecutiveHighWindows((prev) => {
+        const next = prev + 1;
+        alertWindowsRef.current += 1;
+        if (next === 1) setFocusSignal("slow_down");
+        if (next >= 2 && Date.now() > nextRecoveryAlertAtRef.current) {
+          setFocusSignal("take_break");
+          setRunning(false);
+          setRecoveryReason(
+            "Your heart rate has stayed elevated above your session baseline. Take a short recovery break.",
+          );
+          nextRecoveryAlertAtRef.current = Date.now() + 10 * 60 * 1000;
+        }
+        return next;
+      });
+    } else {
+      setConsecutiveHighWindows(0);
+      setFocusSignal("steady");
+    }
+
+    peakRollingBpmRef.current = Math.max(peakRollingBpmRef.current ?? rolling, rolling);
+    rollingTotalRef.current += rolling;
+    rollingCountRef.current += 1;
+  }, [ouraMetrics, running, mode, sessionBaselineBpm]);
+
   function resolveManualDate() {
     if (manualDateMode === "today") return todayDateInputValue();
     if (manualDateMode === "yesterday") return yesterdayDateInputValue();
@@ -257,6 +416,11 @@ export function DashboardApp({ username }: { username: string }) {
     }
   }
 
+  async function changeProject(nextProjectId: string) {
+    await flushPendingSeconds(projectId);
+    setProjectId(nextProjectId);
+  }
+
   async function loadSummary(nextProjectId: string) {
     const q = new URLSearchParams();
     q.set("projectId", nextProjectId);
@@ -268,15 +432,44 @@ export function DashboardApp({ username }: { username: string }) {
     setSummary(payload);
   }
 
-  async function loadOuraMetrics() {
+  async function loadOuraMetrics(focusStart?: string | null) {
     setOuraError(null);
-    const res = await fetch("/api/oura/metrics", { cache: "no-store" });
+    const query = new URLSearchParams();
+    if (focusStart) query.set("focusStart", focusStart);
+    const url = query.toString() ? `/api/oura/metrics?${query.toString()}` : "/api/oura/metrics";
+    const res = await fetch(url, { cache: "no-store" });
     const payload = (await res.json()) as OuraMetrics & { error?: string };
     if (!res.ok) {
       setOuraError(payload.error || "Could not fetch Oura metrics.");
       return;
     }
     setOuraMetrics(payload);
+  }
+
+  async function persistFocusTelemetry() {
+    const startedAt = focusSessionStartedAtRef.current;
+    const endedAt = new Date().toISOString();
+    const baseline = sessionBaselineBpm ?? ouraMetrics?.profile.baselineMedianBpm ?? null;
+    const peak = peakRollingBpmRef.current;
+    const avg =
+      rollingCountRef.current > 0
+        ? rollingTotalRef.current / rollingCountRef.current
+        : null;
+
+    if (!startedAt || !baseline || !peak || !avg) return;
+
+    await fetch("/api/oura/focus-telemetry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionStartedAt: startedAt,
+        sessionEndedAt: endedAt,
+        baselineBpm: baseline,
+        peakRollingBpm: peak,
+        avgRollingBpm: avg,
+        alertWindows: alertWindowsRef.current,
+      }),
+    });
   }
 
   async function addManualLog() {
@@ -308,10 +501,26 @@ export function DashboardApp({ username }: { username: string }) {
 
   const activeMode = MODES[mode];
   const ringOffset = 590 * (1 - remaining / (durations[mode] || 1));
+  const stressTodaySummary = ouraMetrics?.stressToday
+    ? `Today: Stressed ${ouraMetrics.stressToday.stressedHours}h`
+    : "Today: No stress data";
+  const activeProject = projectId === "all" ? null : projects.find((p) => p.id === projectId) || null;
+  const activeProjectName = activeProject?.name || "No Project";
+  const timerAccentColor = mode === "focus" ? activeProject?.color || DEFAULT_PROJECT_COLOR : activeMode.color;
+  const timerAccentRgb = timerAccentColor ? hexToRgb(timerAccentColor) : null;
+  const timerCardStyle = timerAccentRgb
+    ? ({
+        "--accent": timerAccentColor,
+        "--accent-soft": rgbToCss(shiftRgb(timerAccentRgb, 24)),
+        "--track": rgbToCss(shiftRgb(timerAccentRgb, 165), 0.52),
+        "--accent-shadow": rgbToCss(timerAccentRgb, 0.34),
+        "--accent-glow": rgbToCss(timerAccentRgb, 0.12),
+      } as CSSProperties)
+    : undefined;
 
   return (
     <main className="app-shell">
-      <section className="timer-card" aria-label="Pomodoro tracker">
+      <section className="timer-card" style={timerCardStyle} aria-label="Pomodoro tracker">
         <header className="heading-block">
           <div className="header-row">
             <div>
@@ -319,29 +528,68 @@ export function DashboardApp({ username }: { username: string }) {
               <h1>Pulse Pomodoro</h1>
               <p className="subtitle">Signed in as {username}</p>
             </div>
-            <div className="nav-group">
-              <button
-                className="primary quick-header-btn"
-                onClick={() => {
-                  setManualProjectId(projectId);
-                  setProjectQuery("");
-                  setManualModalOpen(true);
-                }}
-              >
-                Quick Add Log
+          </div>
+          <div className="nav-group nav-group-row">
+            <button
+              className="primary quick-header-btn"
+              onClick={() => {
+                setManualProjectId(projectId);
+                setProjectQuery("");
+                setManualModalOpen(true);
+              }}
+            >
+              Quick Add Log
+            </button>
+            <Link className="ghost nav-link" href="/settings">
+              Settings
+            </Link>
+            <Link className="ghost nav-link" href="/projects">
+              Projects
+            </Link>
+            <Link className="ghost nav-link" href="/stats">
+              Stats
+            </Link>
+            <button className="ghost" onClick={logout}>
+              Logout
+            </button>
+          </div>
+          <div className="header-mobile-actions">
+            <button
+              className="primary quick-header-btn quick-header-btn-mobile"
+              onClick={() => {
+                setManualProjectId(projectId);
+                setProjectQuery("");
+                setManualModalOpen(true);
+              }}
+            >
+              Quick Add Log
+            </button>
+            <div className="mobile-menu-wrap">
+              <button className="ghost mobile-menu-toggle" onClick={() => setMobileMenuOpen((v) => !v)}>
+                Menu
               </button>
-              <Link className="ghost nav-link" href="/settings">
-                Settings
-              </Link>
-              <Link className="ghost nav-link" href="/projects">
-                Projects
-              </Link>
-              <Link className="ghost nav-link" href="/stats">
-                Stats
-              </Link>
-              <button className="ghost" onClick={logout}>
-                Logout
-              </button>
+              {mobileMenuOpen ? (
+                <div className="mobile-nav-panel">
+                  <Link className="mobile-nav-item" href="/settings" onClick={() => setMobileMenuOpen(false)}>
+                    Settings
+                  </Link>
+                  <Link className="mobile-nav-item" href="/projects" onClick={() => setMobileMenuOpen(false)}>
+                    Projects
+                  </Link>
+                  <Link className="mobile-nav-item" href="/stats" onClick={() => setMobileMenuOpen(false)}>
+                    Stats
+                  </Link>
+                  <button
+                    className="mobile-nav-item"
+                    onClick={() => {
+                      setMobileMenuOpen(false);
+                      void logout();
+                    }}
+                  >
+                    Logout
+                  </button>
+                </div>
+              ) : null}
             </div>
           </div>
         </header>
@@ -372,7 +620,7 @@ export function DashboardApp({ username }: { username: string }) {
                 cx="110"
                 cy="110"
                 r="94"
-                style={{ stroke: activeMode.color, strokeDasharray: 590, strokeDashoffset: ringOffset }}
+                style={{ stroke: timerAccentColor, strokeDasharray: 590, strokeDashoffset: ringOffset }}
               />
             </svg>
             <div className="clock-text">
@@ -385,7 +633,7 @@ export function DashboardApp({ username }: { username: string }) {
           </section>
         </section>
 
-        <section className="control-row">
+        <section className="control-row control-row-desktop">
           <button className="primary" onClick={() => setRunning((v) => !v)}>
             {running ? "Pause" : "Start"}
           </button>
@@ -434,35 +682,81 @@ export function DashboardApp({ username }: { username: string }) {
             Skip
           </button>
         </section>
+        <section className="control-row-mobile" aria-label="Mobile timer controls">
+          <button className="primary" onClick={() => setRunning((v) => !v)}>
+            {running ? "Pause" : "Start"}
+          </button>
+          <button className="ghost mobile-tools-toggle" onClick={() => setMobileToolsOpen((v) => !v)}>
+            {mobileToolsOpen ? "Hide Controls" : "More Controls"}
+          </button>
+              {mobileToolsOpen ? (
+            <div className="mobile-tools-panel">
+              <button
+                className="ghost"
+                onClick={async () => {
+                  await flushPendingSeconds(projectId);
+                  setMode("focus");
+                  setRunning(false);
+                  setRemaining(warmUpMinutes * 60);
+                }}
+              >
+                Warm Up ({warmUpMinutes}m)
+              </button>
+              <button className="ghost" onClick={() => setRemaining((prev) => prev + 5 * 60)}>
+                +5 min
+              </button>
+              <button
+                className="ghost"
+                onClick={async () => {
+                  await flushPendingSeconds(projectId);
+                  setMode("focus");
+                  setRunning(false);
+                  setRemaining(durations.focus);
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : null}
+        </section>
 
         <section className="project-panel project-panel-bottom" aria-label="Project tags">
           <div className="inline-field inline-grow">
          
-            <div className="badge-picker">
+            <div className="badge-picker project-scroll-picker">
               <h3>Select Project:</h3>
               <button
                 className={`project-badge ${projectId === "all" ? "is-active" : ""}`}
-                style={getBadgeStyles("all")}
-                onClick={async () => {
-                  await flushPendingSeconds(projectId);
-                  setProjectId("all");
-                }}
+                onClick={() => void changeProject("all")}
               >
+                <span className="project-badge-dot" style={{ background: UNSELECTED_PROJECT_DOT }} />
                 No Project
               </button>
               {projects.map((project) => (
                 <button
                   key={project.id}
                   className={`project-badge ${projectId === project.id ? "is-active" : ""}`}
-                  style={getBadgeStyles(project.name)}
-                  onClick={async () => {
-                    await flushPendingSeconds(projectId);
-                    setProjectId(project.id);
-                  }}
+                  onClick={() => void changeProject(project.id)}
                 >
+                  <span className="project-badge-dot" style={{ background: projectDotColor(project) }} />
                   {project.name}
                 </button>
               ))}
+            </div>
+            <div className="project-picker-mobile">
+              <button
+                className="project-mobile-trigger"
+                onClick={() => setMobileProjectPickerOpen(true)}
+              >
+                <span className="project-mobile-label">Project</span>
+                <span className="project-mobile-main">
+                  <span className="project-mobile-main-left">
+                    <span className="project-badge-dot" style={{ background: projectDotColor(activeProject) }} />
+                    <span className="project-mobile-value">{activeProjectName}</span>
+                  </span>
+                  <span className="project-mobile-chevron">Change</span>
+                </span>
+              </button>
             </div>
           </div>
         </section>
@@ -470,10 +764,10 @@ export function DashboardApp({ username }: { username: string }) {
         <section className="live-stats">
           <article className="stat-chip">
             <p className="chip-label">Today</p>
-            <p className="chip-value">{summary?.todayMinutes ?? 0} min</p>
+            <p className="chip-value">{formatMinutesAsHours(summary?.todayMinutes ?? 0)}</p>
           </article>
           <article className="stat-chip">
-            <p className="chip-label">Oura Live</p>
+            <p className="chip-label">Focus Biofeedback</p>
             {ouraError ? (
               <>
                 <p className="chip-subvalue">Oura data unavailable right now.</p>
@@ -492,11 +786,54 @@ export function DashboardApp({ username }: { username: string }) {
               </>
             ) : (
               <>
-                <p className="chip-value">{ouraMetrics.heartRate ?? "--"} bpm</p>
-                <p className="chip-subvalue">Current heart rate</p>
-                <p className={`state-pill ${stressTone(ouraMetrics.stressState)}`}>
-                  Current Stress: {ouraMetrics.stressState ?? "--"}
-                </p>
+                <div className="bio-desktop">
+                  <p className={`state-pill signal-pill signal-pill--primary ${signalTone(focusSignal)}`}>
+                    {focusSignal === "steady" ? "● Focus steady" : focusSignal === "slow_down" ? "◐ Slow down" : "▲ Take a break"}
+                  </p>
+                  <div className="bio-metrics-grid">
+                    <span className="bio-metric-pill">Current HR: {ouraMetrics.latestHeartRate ?? "--"} bpm</span>
+                    <span className="bio-metric-pill">Rolling 5-min avg: {rollingAvgBpm ? Math.round(rollingAvgBpm) : "--"} bpm</span>
+                    <span className="bio-metric-pill">
+                      Baseline: {sessionBaselineBpm ? Math.round(sessionBaselineBpm) : ouraMetrics.profile.baselineMedianBpm ?? "--"} bpm
+                    </span>
+                    <span className="bio-metric-pill">High windows: {consecutiveHighWindows}</span>
+                  </div>
+                </div>
+                <div className="bio-mobile">
+                  <button className="bio-mobile-row" onClick={() => setBioDetailsOpen((v) => !v)}>
+                    <span className={`state-pill signal-pill ${signalTone(focusSignal)}`}>
+                      {focusSignal === "steady" ? "Focus steady" : focusSignal === "slow_down" ? "Slow down" : "Take a break"}
+                    </span>
+                    <span className="bio-mobile-summary">{stressTodaySummary}</span>
+                    <span className="bio-mobile-chevron">{bioDetailsOpen ? "Hide" : "Details"}</span>
+                  </button>
+                  {bioDetailsOpen ? (
+                    <div className="bio-mobile-details">
+                      <div className="bio-metrics-grid">
+                        <span className="bio-metric-pill">Current HR: {ouraMetrics.latestHeartRate ?? "--"} bpm</span>
+                        <span className="bio-metric-pill">Rolling 5-min avg: {rollingAvgBpm ? Math.round(rollingAvgBpm) : "--"} bpm</span>
+                        <span className="bio-metric-pill">
+                          Baseline: {sessionBaselineBpm ? Math.round(sessionBaselineBpm) : ouraMetrics.profile.baselineMedianBpm ?? "--"} bpm
+                        </span>
+                        <span className="bio-metric-pill">High windows: {consecutiveHighWindows}</span>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+                {!ouraMetrics.heartRateSamples.length ? (
+                  <p className="chip-subvalue">No recent HR samples yet. Start a focus session while wearing Oura.</p>
+                ) : null}
+                {ouraMetrics.stressToday ? (
+                  <div className="stress-context">
+                    <p className="chip-label">Today so far</p>
+                    <div className="stress-chip-row">
+                      <span className="stress-chip">Stressed · {ouraMetrics.stressToday.stressedHours}h</span>
+                      <span className="stress-chip">Engaged · {ouraMetrics.stressToday.engagedHours}h</span>
+                      <span className="stress-chip">Relaxed · {ouraMetrics.stressToday.relaxedHours}h</span>
+                      <span className="stress-chip">Restored · {ouraMetrics.stressToday.restoredHours}h</span>
+                    </div>
+                  </div>
+                ) : null}
               </>
             )}
           </article>
@@ -576,18 +913,18 @@ export function DashboardApp({ username }: { username: string }) {
             <div className="badge-picker modal-project-picker">
               <button
                 className={`project-badge ${manualProjectId === "all" ? "is-active" : ""}`}
-                style={getBadgeStyles("all")}
                 onClick={() => setManualProjectId("all")}
               >
+                <span className="project-badge-dot" style={{ background: UNSELECTED_PROJECT_DOT }} />
                 No Project
               </button>
               {filteredProjects.map((project) => (
                 <button
                   key={`manual-${project.id}`}
                   className={`project-badge ${manualProjectId === project.id ? "is-active" : ""}`}
-                  style={getBadgeStyles(project.name)}
                   onClick={() => setManualProjectId(project.id)}
                 >
+                  <span className="project-badge-dot" style={{ background: projectDotColor(project) }} />
                   {project.name}
                 </button>
               ))}
@@ -629,6 +966,36 @@ export function DashboardApp({ username }: { username: string }) {
         </div>
       ) : null}
 
+      {recoveryReason ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Recovery pause recommendation">
+          <section className="modal-card recovery-card">
+            <header className="modal-head">
+              <h2>Break Recommended</h2>
+              <button className="ghost" onClick={() => setRecoveryReason(null)}>
+                Close
+              </button>
+            </header>
+            <p className="rank-change-copy">{recoveryReason}</p>
+            <div className="control-row modal-actions">
+              <button
+                className="primary"
+                onClick={async () => {
+                  await flushPendingSeconds(projectId);
+                  setMode("shortBreak");
+                  setRemaining(durations.shortBreak);
+                  setRecoveryReason(null);
+                }}
+              >
+                Start Short Break
+              </button>
+              <button className="ghost" onClick={() => setRecoveryReason(null)}>
+                Continue Anyway
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {rankChange ? (
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Rank status update">
           <section className={`modal-card rank-change-card ${rankChange.direction === "up" ? "is-up" : "is-down"}`}>
@@ -657,6 +1024,44 @@ export function DashboardApp({ username }: { username: string }) {
               >
                 View Rank Ladder
               </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {mobileProjectPickerOpen ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Pick project">
+          <section className="mobile-sheet">
+            <header className="modal-head">
+              <h2>Select Project</h2>
+              <button className="ghost" onClick={() => setMobileProjectPickerOpen(false)}>
+                Close
+              </button>
+            </header>
+            <div className="mobile-project-list">
+              <button
+                className={`project-badge ${projectId === "all" ? "is-active" : ""}`}
+                onClick={async () => {
+                  await changeProject("all");
+                  setMobileProjectPickerOpen(false);
+                }}
+              >
+                <span className="project-badge-dot" style={{ background: UNSELECTED_PROJECT_DOT }} />
+                No Project
+              </button>
+              {projects.map((project) => (
+                <button
+                  key={`sheet-${project.id}`}
+                  className={`project-badge ${projectId === project.id ? "is-active" : ""}`}
+                  onClick={async () => {
+                    await changeProject(project.id);
+                    setMobileProjectPickerOpen(false);
+                  }}
+                >
+                  <span className="project-badge-dot" style={{ background: projectDotColor(project) }} />
+                  {project.name}
+                </button>
+              ))}
             </div>
           </section>
         </div>

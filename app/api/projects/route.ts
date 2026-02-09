@@ -21,8 +21,8 @@ export async function POST(req: NextRequest) {
   if (response || !session) return response!;
 
   try {
-    const { name } = await req.json();
-    const project = await createProject(session.userId, String(name || ""));
+    const { name, color } = await req.json();
+    const project = await createProject(session.userId, String(name || ""), color ? String(color) : null);
     return NextResponse.json({ project });
   } catch (error) {
     console.error("POST /api/projects failed", error);

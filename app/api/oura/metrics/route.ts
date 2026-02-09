@@ -1,8 +1,8 @@
-import { NextResponse } from "next/server";
-import { getOuraMetrics, isOuraConfigured } from "@/lib/oura";
+import { NextRequest, NextResponse } from "next/server";
+import { getOuraBiofeedback, isOuraConfigured } from "@/lib/oura";
 import { requireSession } from "@/lib/route-auth";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const { session, response } = await requireSession();
   if (response || !session) return response!;
 
@@ -12,24 +12,26 @@ export async function GET() {
   if (!process.env.OURA_REDIRECT_URI) missing.push("OURA_REDIRECT_URI");
 
   if (!isOuraConfigured()) {
-    console.error("GET /api/oura/metrics not configured", {
-      userId: session.userId,
-      missing,
-    });
     return NextResponse.json({
       configured: false,
       missing,
       connected: false,
-      heartRate: null,
-      heartRateTime: null,
-      stressState: null,
-      stressDate: null,
+      heartRateSamples: [],
+      latestHeartRate: null,
+      latestHeartRateTime: null,
+      stressToday: null,
+      profile: {
+        baselineMedianBpm: null,
+        typicalDriftBpm: null,
+        sampleCount: 0,
+      },
       warning: null,
     });
   }
 
   try {
-    const metrics = await getOuraMetrics(session.userId);
+    const focusStart = req.nextUrl.searchParams.get("focusStart");
+    const metrics = await getOuraBiofeedback(session.userId, focusStart);
     return NextResponse.json({
       configured: true,
       missing: [],
@@ -37,16 +39,24 @@ export async function GET() {
     });
   } catch (error) {
     console.error("GET /api/oura/metrics failed", error);
-    return NextResponse.json({
-      configured: true,
-      missing: [],
-      connected: false,
-      heartRate: null,
-      heartRateTime: null,
-      stressState: null,
-      stressDate: null,
-      warning: "Unexpected Oura error. Please reconnect Oura.",
-      error: "Failed to load Oura metrics.",
-    });
+    return NextResponse.json(
+      {
+        configured: true,
+        missing: [],
+        connected: false,
+        heartRateSamples: [],
+        latestHeartRate: null,
+        latestHeartRateTime: null,
+        stressToday: null,
+        profile: {
+          baselineMedianBpm: null,
+          typicalDriftBpm: null,
+          sampleCount: 0,
+        },
+        warning: "Unexpected Oura error. Please reconnect Oura.",
+        error: "Failed to load Oura metrics.",
+      },
+      { status: 500 },
+    );
   }
 }

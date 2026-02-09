@@ -9,15 +9,47 @@ function normalizeProjectName(name: string) {
   return name.trim().replace(/\s+/g, " ").slice(0, 40);
 }
 
+function normalizeProjectColor(color?: string | null) {
+  if (!color) return null;
+  const cleaned = color.trim().toLowerCase();
+  if (/^#[0-9a-f]{6}$/.test(cleaned)) return cleaned;
+  return null;
+}
+
 function toMinutes(seconds: number) {
   return Math.floor(seconds / 60);
 }
 
-function hasMissingArchivedColumn(error: unknown) {
+function hasMissingColumn(error: unknown, column: string) {
   if (!error || typeof error !== "object") return false;
   const code = (error as { code?: string }).code;
   const message = String((error as { message?: string }).message || "");
-  return code === "42703" || message.includes("archived");
+  return code === "42703" || message.includes(column);
+}
+
+function hasMissingArchivedColumn(error: unknown) {
+  return hasMissingColumn(error, "archived");
+}
+
+function hasMissingColorColumn(error: unknown) {
+  return hasMissingColumn(error, "color");
+}
+
+function isSupabaseConnectTimeout(error: unknown) {
+  if (!error || typeof error !== "object") return false;
+  const record = error as { message?: unknown; details?: unknown };
+  const message = String(record.message || "");
+  const details = String(record.details || "");
+  return (
+    message.includes("fetch failed") ||
+    details.includes("fetch failed") ||
+    details.includes("UND_ERR_CONNECT_TIMEOUT") ||
+    details.includes("Connect Timeout Error")
+  );
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function parseDateInput(dateValue?: string) {
@@ -70,7 +102,7 @@ function labelForPoint(date: Date, period: Period, index: number) {
 export async function listProjects(userId: string, includeArchived = true) {
   let query = supabase
     .from("projects")
-    .select("id, name, archived")
+    .select("id, name, archived, color")
     .eq("user_id", userId)
     .order("created_at", { ascending: true });
 
@@ -95,24 +127,25 @@ export async function listProjects(userId: string, includeArchived = true) {
   const normalized = (fallbackData ?? []).map((project) => {
     const archived = project.name.startsWith(ARCHIVE_PREFIX);
     const name = archived ? project.name.replace(ARCHIVE_PREFIX, "") : project.name;
-    return { ...project, archived, name };
+    return { ...project, archived, name, color: null };
   });
 
   return includeArchived ? normalized : normalized.filter((project) => !project.archived);
 }
 
-export async function createProject(userId: string, rawName: string) {
+export async function createProject(userId: string, rawName: string, rawColor?: string | null) {
   const name = normalizeProjectName(rawName);
   if (!name) throw new Error("Project name is required");
+  const color = normalizeProjectColor(rawColor);
 
   const { data, error } = await supabase
     .from("projects")
-    .insert({ user_id: userId, name, archived: false })
-    .select("id, name, archived")
+    .insert({ user_id: userId, name, archived: false, color })
+    .select("id, name, archived, color")
     .single();
 
   if (!error) return data;
-  if (!hasMissingArchivedColumn(error)) throw error;
+  if (!hasMissingArchivedColumn(error) && !hasMissingColorColumn(error)) throw error;
 
   const { data: fallbackData, error: fallbackError } = await supabase
     .from("projects")
@@ -121,7 +154,7 @@ export async function createProject(userId: string, rawName: string) {
     .single();
 
   if (fallbackError) throw fallbackError;
-  return { ...fallbackData, archived: false };
+  return { ...fallbackData, archived: false, color: null };
 }
 
 export async function setProjectArchived(userId: string, projectId: string, archived: boolean) {
@@ -130,7 +163,7 @@ export async function setProjectArchived(userId: string, projectId: string, arch
     .update({ archived })
     .eq("user_id", userId)
     .eq("id", projectId)
-    .select("id, name, archived")
+    .select("id, name, archived, color")
     .single();
 
   if (!error) return data;
@@ -162,6 +195,32 @@ export async function setProjectArchived(userId: string, projectId: string, arch
   return { ...fallbackData, archived, name: normalizedName };
 }
 
+export async function setProjectColor(userId: string, projectId: string, rawColor: string) {
+  const color = normalizeProjectColor(rawColor);
+  if (!color) throw new Error("Invalid color format");
+
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const { data, error } = await supabase
+      .from("projects")
+      .update({ color })
+      .eq("user_id", userId)
+      .eq("id", projectId)
+      .select("id, name, archived, color")
+      .single();
+
+    if (!error) return data;
+    if (hasMissingColorColumn(error)) {
+      throw new Error("Project color is not available yet. Please run latest schema migration.");
+    }
+
+    lastError = error;
+    if (!isSupabaseConnectTimeout(error) || attempt === 3) break;
+    await sleep(attempt * 250);
+  }
+  throw lastError;
+}
+
 export async function getProjectTotals(userId: string) {
   const [projects, logsResult] = await Promise.all([
     listProjects(userId, true),
@@ -181,6 +240,7 @@ export async function getProjectTotals(userId: string) {
     id: project.id,
     name: project.name,
     archived: Boolean(project.archived),
+    color: project.color || null,
     totalSeconds: totals.get(project.id) ?? 0,
   }));
 }
