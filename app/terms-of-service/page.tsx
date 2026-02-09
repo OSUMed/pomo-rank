@@ -15,9 +15,7 @@ export default function TermsOfServicePage() {
             You may not abuse, disrupt, or attempt unauthorized access to the service. We may suspend access for
             misuse.
           </p>
-          <p>
-            Contact: replace-this-email@yourdomain.com
-          </p>
+          <p>Contact: srikanthsmedicherla@gmail.com</p>
         </section>
       </section>
     </main>

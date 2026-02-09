@@ -239,6 +239,19 @@ input, select { width: 100%; padding: .6rem .7rem; border-radius: 10px; border: 
 .modal-head h2 { margin: 0; font-size: 1.2rem; }
 .modal-actions { justify-content: flex-end; margin-top: .8rem; }
 .modal-project-picker { margin-top: .6rem; max-height: 180px; }
+.rank-change-card.is-up {
+  background: linear-gradient(145deg, rgba(235,255,245,.98), rgba(247,255,251,.95));
+  border-color: #bde9cd;
+}
+.rank-change-card.is-down {
+  background: linear-gradient(145deg, rgba(255,245,242,.98), rgba(255,251,250,.95));
+  border-color: #f1c8bf;
+}
+.rank-change-copy {
+  margin: .6rem 0 0;
+  color: var(--ink);
+  line-height: 1.45;
+}
 .side-panel {
   width: min(480px, 100%);
   height: min(100vh, 820px);

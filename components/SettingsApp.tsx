@@ -82,6 +82,7 @@ export function SettingsApp({ username }: { username: string }) {
   useEffect(() => {
     setSettings(loadSettings());
     void loadOuraMetrics();
+    handleOuraRedirectState();
 
     const timer = window.setInterval(() => {
       void loadOuraMetrics();
@@ -95,6 +96,32 @@ export function SettingsApp({ username }: { username: string }) {
     if (!res.ok) return;
     const payload = (await res.json()) as OuraMetrics;
     setOuraMetrics(payload);
+  }
+
+  function handleOuraRedirectState() {
+    const params = new URLSearchParams(window.location.search);
+    const ouraState = params.get("oura");
+    const connectedCookie = document.cookie.includes("oura_connected=1");
+
+    if (connectedCookie) {
+      setMessage("Oura connected successfully.");
+      document.cookie = "oura_connected=; Max-Age=0; path=/; SameSite=Lax";
+    }
+
+    if (ouraState === "invalid_state") {
+      setMessage("Oura connection expired. Please try connecting again.");
+    } else if (ouraState === "connect_failed") {
+      setMessage("Oura login failed. Please try again.");
+    } else if (ouraState === "config_missing") {
+      setMessage("Oura setup is missing in deployment env vars. Add OURA_CLIENT_ID/SECRET/REDIRECT_URI.");
+    }
+
+    if (ouraState) {
+      params.delete("oura");
+      const cleaned = params.toString();
+      const url = `${window.location.pathname}${cleaned ? `?${cleaned}` : ""}`;
+      window.history.replaceState({}, "", url);
+    }
   }
 
   async function disconnectOura() {
@@ -165,7 +192,17 @@ export function SettingsApp({ username }: { username: string }) {
           <h2>Oura Integration</h2>
           <article className="metric-card oura-card">
             {!ouraMetrics?.configured ? (
-              <p>Oura is not configured for this deployment yet.</p>
+              <>
+                <p>Oura is not configured for this deployment yet.</p>
+                <p className="chip-subvalue">
+                  Set `OURA_CLIENT_ID`, `OURA_CLIENT_SECRET`, and `OURA_REDIRECT_URI` in Vercel, then reconnect here.
+                </p>
+                <div className="control-row">
+                  <a className="ghost nav-link" href="/api/oura/connect?next=/settings">
+                    Retry Oura Connect
+                  </a>
+                </div>
+              </>
             ) : !ouraMetrics.connected ? (
               <>
                 <p className="chip-subvalue">Connect your Oura account to show wearable context while you focus.</p>

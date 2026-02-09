@@ -16,9 +16,7 @@ export default function PrivacyPolicyPage() {
             We do not sell personal data. Data is processed to operate the app and can be removed by deleting your
             account or disconnecting Oura.
           </p>
-          <p>
-            Contact: replace-this-email@yourdomain.com
-          </p>
+          <p>Contact: srikanthsmedicherla@gmail.com</p>
         </section>
       </section>
     </main>

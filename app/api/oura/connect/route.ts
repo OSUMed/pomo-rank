@@ -10,14 +10,17 @@ export async function GET(req: NextRequest) {
   const { response } = await requireSession();
   if (response) return response;
 
+  const nextPath = req.nextUrl.searchParams.get("next");
+  const safeNextPath = nextPath && nextPath.startsWith("/") ? nextPath : "/settings";
+
   if (!isOuraConfigured()) {
-    return NextResponse.json({ error: "Oura is not configured on this deployment." }, { status: 500 });
+    const redirectUrl = new URL(safeNextPath, req.url);
+    redirectUrl.searchParams.set("oura", "config_missing");
+    return NextResponse.redirect(redirectUrl);
   }
 
   try {
     const state = crypto.randomUUID();
-    const nextPath = req.nextUrl.searchParams.get("next");
-    const safeNextPath = nextPath && nextPath.startsWith("/") ? nextPath : "/settings";
 
     cookies().set(OURA_STATE_COOKIE, state, {
       httpOnly: true,

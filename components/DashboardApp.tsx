@@ -26,6 +26,13 @@ type OuraMetrics = {
 };
 
 const SETTINGS_KEY = "pulseSessionSettingsV1";
+const LAST_RANK_KEY = "pulseLastAllRankTitle";
+
+type RankChangeState = {
+  direction: "up" | "down";
+  from: string;
+  to: string;
+} | null;
 
 const MODES: Record<Mode, { label: string; color: string; duration: number }> = {
   focus: { label: "Focus time", color: "#ff5d47", duration: 25 * 60 },
@@ -103,6 +110,7 @@ export function DashboardApp({ username }: { username: string }) {
   const [message, setMessage] = useState("");
   const [manualModalOpen, setManualModalOpen] = useState(false);
   const [rankModalOpen, setRankModalOpen] = useState(false);
+  const [rankChange, setRankChange] = useState<RankChangeState>(null);
   const pendingSecondsRef = useRef(0);
 
   const durations = useMemo(
@@ -152,6 +160,28 @@ export function DashboardApp({ username }: { username: string }) {
   useEffect(() => {
     void loadSummary(projectId);
   }, [projectId]);
+
+  useEffect(() => {
+    if (!summary?.rankTitle || projectId !== "all") return;
+
+    const previous = localStorage.getItem(LAST_RANK_KEY);
+    const current = summary.rankTitle;
+
+    if (previous && previous !== current) {
+      const previousIndex = RANK_TIERS.findIndex((tier) => tier.title === previous);
+      const currentIndex = RANK_TIERS.findIndex((tier) => tier.title === current);
+
+      if (previousIndex >= 0 && currentIndex >= 0) {
+        setRankChange({
+          direction: currentIndex > previousIndex ? "up" : "down",
+          from: previous,
+          to: current,
+        });
+      }
+    }
+
+    localStorage.setItem(LAST_RANK_KEY, current);
+  }, [summary?.rankTitle, projectId]);
 
   useEffect(() => {
     if (!running) return;
@@ -577,6 +607,39 @@ export function DashboardApp({ username }: { username: string }) {
                   <p>{tier.minMinutes}+ min/day avg</p>
                 </article>
               ))}
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {rankChange ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Rank status update">
+          <section className={`modal-card rank-change-card ${rankChange.direction === "up" ? "is-up" : "is-down"}`}>
+            <header className="modal-head">
+              <h2>{rankChange.direction === "up" ? "Rank Up Achieved" : "Rank Dropped"}</h2>
+              <button className="ghost" onClick={() => setRankChange(null)}>
+                Close
+              </button>
+            </header>
+            {rankChange.direction === "up" ? (
+              <p className="rank-change-copy">
+                Strong momentum. You climbed from <strong>{rankChange.from}</strong> to <strong>{rankChange.to}</strong>.
+              </p>
+            ) : (
+              <p className="rank-change-copy">
+                Stay consistent this week. You moved from <strong>{rankChange.from}</strong> to <strong>{rankChange.to}</strong>.
+              </p>
+            )}
+            <div className="control-row modal-actions">
+              <button
+                className="primary"
+                onClick={() => {
+                  setRankChange(null);
+                  setRankModalOpen(true);
+                }}
+              >
+                View Rank Ladder
+              </button>
             </div>
           </section>
         </div>
