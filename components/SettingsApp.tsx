@@ -8,8 +8,6 @@ const SETTINGS_KEY = "pulseSessionSettingsV1";
 type SessionSettings = {
   focusMinutes: number;
   shortMinutes: number;
-  longMinutes: number;
-  longEvery: number;
   warmUpMinutes: number;
 };
 
@@ -22,10 +20,10 @@ type OuraMetrics = {
   latestHeartRateTime: string | null;
   stressToday: {
     date: string | null;
-    stressedHours: number;
-    engagedHours: number;
-    relaxedHours: number;
-    restoredHours: number;
+    stressedMinutes: number;
+    engagedMinutes: number;
+    relaxedMinutes: number;
+    restoredMinutes: number;
   } | null;
   profile: {
     baselineMedianBpm: number | null;
@@ -38,16 +36,12 @@ type OuraMetrics = {
 const DEFAULTS: SessionSettings = {
   focusMinutes: 25,
   shortMinutes: 5,
-  longMinutes: 15,
-  longEvery: 4,
   warmUpMinutes: 3,
 };
 
 const LIMITS = {
   focusMinutes: { min: 1, max: 90, step: 1, label: "Focus (min)" },
   shortMinutes: { min: 1, max: 30, step: 1, label: "Short Break (min)" },
-  longMinutes: { min: 1, max: 45, step: 1, label: "Long Break (min)" },
-  longEvery: { min: 2, max: 8, step: 1, label: "Long Break Every (cycles)" },
   warmUpMinutes: { min: 1, max: 20, step: 1, label: "Warm Up Default (min)" },
 } as const;
 
@@ -91,8 +85,6 @@ function loadSettings(): SessionSettings {
     return {
       focusMinutes: clamp(Number(parsed.focusMinutes) || DEFAULTS.focusMinutes, LIMITS.focusMinutes.min, LIMITS.focusMinutes.max),
       shortMinutes: clamp(Number(parsed.shortMinutes) || DEFAULTS.shortMinutes, LIMITS.shortMinutes.min, LIMITS.shortMinutes.max),
-      longMinutes: clamp(Number(parsed.longMinutes) || DEFAULTS.longMinutes, LIMITS.longMinutes.min, LIMITS.longMinutes.max),
-      longEvery: clamp(Number(parsed.longEvery) || DEFAULTS.longEvery, LIMITS.longEvery.min, LIMITS.longEvery.max),
       warmUpMinutes: clamp(Number(parsed.warmUpMinutes) || DEFAULTS.warmUpMinutes, LIMITS.warmUpMinutes.min, LIMITS.warmUpMinutes.max),
     };
   } catch {
@@ -202,8 +194,6 @@ export function SettingsApp({ username }: { username: string }) {
   const keys: Array<keyof SessionSettings> = [
     "focusMinutes",
     "shortMinutes",
-    "longMinutes",
-    "longEvery",
     "warmUpMinutes",
   ];
 
@@ -220,6 +210,9 @@ export function SettingsApp({ username }: { username: string }) {
             <div className="nav-group">
               <Link className="ghost nav-link" href="/dashboard">
                 Back Timer
+              </Link>
+              <Link className="ghost nav-link" href="/history">
+                History
               </Link>
               <Link className="ghost nav-link" href="/stats">
                 Stats
@@ -276,7 +269,7 @@ export function SettingsApp({ username }: { username: string }) {
                 <p className="chip-subvalue">Connected. Oura login + consent is required once to sync data.</p>
                 <div className="oura-stats-grid">
                   <article className="stat-chip">
-                    <p className="chip-label">Current HR</p>
+                    <p className="chip-label">Latest HR</p>
                     <p className="chip-value">{ouraMetrics.latestHeartRate ?? "--"} bpm</p>
                     <p className="chip-subvalue">Last sample: {formatSampleTime(ouraMetrics.latestHeartRateTime)}</p>
                   </article>
@@ -284,11 +277,11 @@ export function SettingsApp({ username }: { username: string }) {
                     <p className="chip-label">Today Stress</p>
                     {ouraMetrics.stressToday ? (
                       <>
-                        <p className="chip-value">{formatDurationFromMinutes(ouraMetrics.stressToday.stressedHours)} stressed</p>
+                        <p className="chip-value">{formatDurationFromMinutes(ouraMetrics.stressToday.stressedMinutes)} stressed</p>
                         <p className="chip-subvalue">
-                          Engaged {formatDurationFromMinutes(ouraMetrics.stressToday.engagedHours)} · Relaxed{" "}
-                          {formatDurationFromMinutes(ouraMetrics.stressToday.relaxedHours)} · Restored{" "}
-                          {formatDurationFromMinutes(ouraMetrics.stressToday.restoredHours)}
+                          Engaged {formatDurationFromMinutes(ouraMetrics.stressToday.engagedMinutes)} · Relaxed{" "}
+                          {formatDurationFromMinutes(ouraMetrics.stressToday.relaxedMinutes)} · Restored{" "}
+                          {formatDurationFromMinutes(ouraMetrics.stressToday.restoredMinutes)}
                         </p>
                       </>
                     ) : (

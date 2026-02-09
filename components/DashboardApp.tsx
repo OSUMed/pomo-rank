@@ -5,7 +5,7 @@ import Link from "next/link";
 import { RANK_TIERS } from "@/lib/rank";
 
 type Project = { id: string; name: string; color: string | null };
-type Mode = "focus" | "shortBreak" | "longBreak";
+type Mode = "focus" | "shortBreak";
 type QuickDateMode = "today" | "yesterday" | "custom";
 
 type DashboardSummary = {
@@ -24,10 +24,10 @@ type OuraMetrics = {
   latestHeartRateTime: string | null;
   stressToday: {
     date: string | null;
-    stressedHours: number;
-    engagedHours: number;
-    relaxedHours: number;
-    restoredHours: number;
+    stressedMinutes: number;
+    engagedMinutes: number;
+    relaxedMinutes: number;
+    restoredMinutes: number;
   } | null;
   profile: {
     baselineMedianBpm: number | null;
@@ -40,7 +40,9 @@ type OuraMetrics = {
 const SETTINGS_KEY = "pulseSessionSettingsV1";
 const LAST_RANK_KEY = "pulseLastAllRankTitle";
 const TIMER_STATE_KEY = "pulseTimerStateV1";
-const OURA_POLL_INTERVAL_MS = 60 * 1000;
+const OURA_POLL_ACTIVE_MS = 60 * 1000;
+const OURA_POLL_IDLE_MS = 5 * 60 * 1000;
+const OURA_POLL_MAX_BACKOFF_MS = 10 * 60 * 1000;
 const FOCUS_WINDOW_MS = 5 * 60 * 1000;
 const DEFAULT_PROJECT_COLOR = "#2b5d8b";
 const UNSELECTED_PROJECT_DOT = "#9ca3af";
@@ -52,22 +54,24 @@ type RankChangeState = {
 } | null;
 
 type TimerSnapshot = {
+  timerProjectId: string;
   mode: Mode;
   remaining: number;
   running: boolean;
-  cycle: number;
-  longEvery: number;
   lastUpdatedAt: string;
   focusSessionStartedAt: string | null;
   focusSeconds: number;
   shortBreakSeconds: number;
-  longBreakSeconds: number;
 };
+
+type CompletionState = {
+  reason: "finished" | "completed";
+  todayMinutes: number;
+} | null;
 
 const MODES: Record<Mode, { label: string; color: string; duration: number }> = {
   focus: { label: "Focus time", color: "#ff5d47", duration: 25 * 60 },
   shortBreak: { label: "Short break", color: "#1f84ff", duration: 5 * 60 },
-  longBreak: { label: "Long break", color: "#13a172", duration: 15 * 60 },
 };
 
 function formatTime(seconds: number) {
@@ -107,6 +111,15 @@ function formatDurationFromMinutes(minutes: number) {
   const h = Math.floor(totalMinutes / 60);
   const m = totalMinutes % 60;
   return m > 0 ? `${h}h ${m}min` : `${h}h`;
+}
+
+function computeSampleAgeMinutes(value: string | null) {
+  if (!value) return null;
+  const ts = new Date(value).getTime();
+  if (!Number.isFinite(ts)) return null;
+  const ageMs = Date.now() - ts;
+  if (ageMs < 0) return 0;
+  return Math.floor(ageMs / 60000);
 }
 
 
@@ -197,47 +210,40 @@ function projectDotColor(project?: Project | null) {
   return project?.color || UNSELECTED_PROJECT_DOT;
 }
 
-function nextTimerStep(mode: Mode, cycle: number, longEvery: number) {
-  if (mode === "focus") {
-    return { mode: cycle % longEvery === 0 ? ("longBreak" as Mode) : ("shortBreak" as Mode), cycle };
-  }
-  if (mode === "longBreak") {
-    return { mode: "focus" as Mode, cycle: 1 };
-  }
-  return { mode: "focus" as Mode, cycle: cycle + 1 };
-}
-
 function replayTimer(
   snapshot: TimerSnapshot,
   elapsedSeconds: number,
-): { mode: Mode; cycle: number; remaining: number; focusSecondsElapsed: number } {
+) {
   const durations = {
     focus: Math.max(1, Math.floor(snapshot.focusSeconds || MODES.focus.duration)),
     shortBreak: Math.max(1, Math.floor(snapshot.shortBreakSeconds || MODES.shortBreak.duration)),
-    longBreak: Math.max(1, Math.floor(snapshot.longBreakSeconds || MODES.longBreak.duration)),
   } as const;
 
   let mode = snapshot.mode;
-  let cycle = snapshot.cycle;
   let remaining = Math.max(1, Math.floor(snapshot.remaining));
   let left = Math.max(0, Math.floor(elapsedSeconds));
   let focusSecondsElapsed = 0;
+  let running = snapshot.running;
 
-  while (left > 0) {
+  while (left > 0 && running) {
     const step = Math.min(left, remaining);
     if (mode === "focus") focusSecondsElapsed += step;
     left -= step;
     remaining -= step;
 
     if (remaining <= 0) {
-      const next = nextTimerStep(mode, cycle, snapshot.longEvery);
-      mode = next.mode;
-      cycle = next.cycle;
-      remaining = durations[mode];
+      if (mode === "focus") {
+        mode = "shortBreak";
+        remaining = durations.shortBreak;
+      } else {
+        mode = "focus";
+        remaining = durations.focus;
+        running = false;
+      }
     }
   }
 
-  return { mode, cycle, remaining: Math.max(1, remaining), focusSecondsElapsed };
+  return { mode, remaining: Math.max(1, remaining), focusSecondsElapsed, running };
 }
 
 export function DashboardApp({ username }: { username: string }) {
@@ -249,11 +255,8 @@ export function DashboardApp({ username }: { username: string }) {
   const [mode, setMode] = useState<Mode>("focus");
   const [remaining, setRemaining] = useState(MODES.focus.duration);
   const [running, setRunning] = useState(false);
-  const [cycle, setCycle] = useState(1);
-  const [longEvery, setLongEvery] = useState(4);
   const [focusMinutes, setFocusMinutes] = useState(25);
   const [shortMinutes, setShortMinutes] = useState(5);
-  const [longMinutes, setLongMinutes] = useState(15);
   const [warmUpMinutes, setWarmUpMinutes] = useState(3);
   const [manualDateMode, setManualDateMode] = useState<QuickDateMode>("today");
   const [customManualDate, setCustomManualDate] = useState(todayDateInputValue());
@@ -273,6 +276,9 @@ export function DashboardApp({ username }: { username: string }) {
   const [rollingAvgBpm, setRollingAvgBpm] = useState<number | null>(null);
   const [sessionBaselineBpm, setSessionBaselineBpm] = useState<number | null>(null);
   const [consecutiveHighWindows, setConsecutiveHighWindows] = useState(0);
+  const [lastManualSyncAt, setLastManualSyncAt] = useState<number | null>(null);
+  const [syncHint, setSyncHint] = useState<string | null>(null);
+  const [completionState, setCompletionState] = useState<CompletionState>(null);
   const pendingSecondsRef = useRef(0);
   const focusSessionStartedAtRef = useRef<string | null>(null);
   const previousFocusRunningRef = useRef(false);
@@ -283,11 +289,11 @@ export function DashboardApp({ username }: { username: string }) {
   const nextRecoveryAlertAtRef = useRef(0);
   const timerHydratedRef = useRef(false);
   const timerRestoredRef = useRef(false);
+  const ouraPollBackoffRef = useRef(OURA_POLL_ACTIVE_MS);
+  const tickAtRef = useRef<number | null>(null);
+  const syncCooldownTimeoutRef = useRef<number | null>(null);
 
-  const durations = useMemo(
-    () => ({ focus: focusMinutes * 60, shortBreak: shortMinutes * 60, longBreak: longMinutes * 60 }),
-    [focusMinutes, shortMinutes, longMinutes],
-  );
+  const durations = useMemo(() => ({ focus: focusMinutes * 60, shortBreak: shortMinutes * 60 }), [focusMinutes, shortMinutes]);
 
   const filteredProjects = useMemo(() => {
     const q = projectQuery.trim().toLowerCase();
@@ -297,6 +303,12 @@ export function DashboardApp({ username }: { username: string }) {
 
   useEffect(() => {
     void loadProjects();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (syncCooldownTimeoutRef.current) window.clearTimeout(syncCooldownTimeoutRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -310,8 +322,6 @@ export function DashboardApp({ username }: { username: string }) {
       const parsed = JSON.parse(raw);
       setFocusMinutes(Math.min(90, Math.max(1, Number(parsed.focusMinutes) || 25)));
       setShortMinutes(Math.min(30, Math.max(1, Number(parsed.shortMinutes) || 5)));
-      setLongMinutes(Math.min(45, Math.max(1, Number(parsed.longMinutes) || 15)));
-      setLongEvery(Math.min(8, Math.max(2, Number(parsed.longEvery) || 4)));
       setWarmUpMinutes(Math.min(20, Math.max(1, Number(parsed.warmUpMinutes) || 3)));
     } catch {
       // ignore malformed settings
@@ -335,62 +345,61 @@ export function DashboardApp({ username }: { username: string }) {
       }
 
       const base: TimerSnapshot = {
-        mode: saved.mode as Mode,
+        timerProjectId: typeof saved.timerProjectId === "string" ? saved.timerProjectId : "all",
+        mode: saved.mode === "shortBreak" ? "shortBreak" : "focus",
         remaining: Math.max(1, Math.floor(Number(saved.remaining) || MODES.focus.duration)),
         running: Boolean(saved.running),
-        cycle: Math.max(1, Math.floor(Number(saved.cycle) || 1)),
-        longEvery: Math.min(8, Math.max(2, Math.floor(Number(saved.longEvery) || longEvery))),
         lastUpdatedAt: String(saved.lastUpdatedAt),
         focusSessionStartedAt: typeof saved.focusSessionStartedAt === "string" ? saved.focusSessionStartedAt : null,
         focusSeconds: Math.max(1, Math.floor(Number(saved.focusSeconds) || durations.focus)),
         shortBreakSeconds: Math.max(1, Math.floor(Number(saved.shortBreakSeconds) || durations.shortBreak)),
-        longBreakSeconds: Math.max(1, Math.floor(Number(saved.longBreakSeconds) || durations.longBreak)),
       };
 
       let nextMode = base.mode;
-      let nextCycle = base.cycle;
       let nextRemaining = base.remaining;
       let recoveredFocusSeconds = 0;
+      let nextRunning = base.running;
 
       if (base.running) {
         const elapsed = Math.max(0, Math.floor((Date.now() - new Date(base.lastUpdatedAt).getTime()) / 1000));
         const replayed = replayTimer(base, elapsed);
         nextMode = replayed.mode;
-        nextCycle = replayed.cycle;
         nextRemaining = replayed.remaining;
         recoveredFocusSeconds = replayed.focusSecondsElapsed;
+        nextRunning = replayed.running;
       }
 
-      if (recoveredFocusSeconds > 0) pendingSecondsRef.current += recoveredFocusSeconds;
-      setLongEvery(base.longEvery);
+      if (recoveredFocusSeconds > 0) {
+        pendingSecondsRef.current += recoveredFocusSeconds;
+        void flushPendingSeconds(base.timerProjectId).then(() => loadSummary(base.timerProjectId));
+      }
+      setProjectId(base.timerProjectId);
+      setManualProjectId(base.timerProjectId);
       setMode(nextMode);
-      setCycle(nextCycle);
       setRemaining(nextRemaining);
-      setRunning(base.running);
-      focusSessionStartedAtRef.current = base.running && nextMode === "focus" ? base.focusSessionStartedAt : null;
+      setRunning(nextRunning);
+      focusSessionStartedAtRef.current = nextRunning && nextMode === "focus" ? base.focusSessionStartedAt : null;
     } catch {
       // ignore malformed timer snapshots
     } finally {
       timerHydratedRef.current = true;
     }
-  }, [durations.focus, durations.shortBreak, durations.longBreak, longEvery]);
+  }, [durations.focus, durations.shortBreak]);
 
   useEffect(() => {
     if (!timerHydratedRef.current) return;
     const snapshot: TimerSnapshot = {
+      timerProjectId: projectId,
       mode,
       remaining,
       running,
-      cycle,
-      longEvery,
       lastUpdatedAt: new Date().toISOString(),
       focusSessionStartedAt: focusSessionStartedAtRef.current,
       focusSeconds: durations.focus,
       shortBreakSeconds: durations.shortBreak,
-      longBreakSeconds: durations.longBreak,
     };
     localStorage.setItem(TIMER_STATE_KEY, JSON.stringify(snapshot));
-  }, [mode, remaining, running, cycle, longEvery, durations.focus, durations.shortBreak, durations.longBreak]);
+  }, [projectId, mode, remaining, running, durations.focus, durations.shortBreak]);
 
   useEffect(() => {
     void loadSummary(projectId);
@@ -420,44 +429,67 @@ export function DashboardApp({ username }: { username: string }) {
 
   useEffect(() => {
     if (!running) return;
+    tickAtRef.current = Date.now();
 
     const timer = setInterval(() => {
+      const now = Date.now();
+      const previousTick = tickAtRef.current ?? now;
+      tickAtRef.current = now;
+      let elapsedSeconds = Math.max(1, Math.floor((now - previousTick) / 1000));
+
       setRemaining((prev) => {
-        const next = prev - 1;
-        if (mode === "focus") {
-          pendingSecondsRef.current += 1;
-          if (pendingSecondsRef.current >= 15) void flushPendingSeconds(projectId);
-        }
+        let remainingNow = prev;
+        let modeNow = mode;
+        let completedFocusBlocks = 0;
+        let shouldStop = false;
 
-        if (next <= 0) {
-          let nextMode: Mode = "focus";
-          let nextCycle = cycle;
-
-          if (mode === "focus") nextMode = cycle % longEvery === 0 ? "longBreak" : "shortBreak";
-          else if (mode === "longBreak") {
-            nextMode = "focus";
-            nextCycle = 1;
-          } else {
-            nextMode = "focus";
-            nextCycle = cycle + 1;
+        while (elapsedSeconds > 0) {
+          const step = Math.min(elapsedSeconds, remainingNow);
+          if (modeNow === "focus") {
+            pendingSecondsRef.current += step;
+            if (pendingSecondsRef.current >= 15) void flushPendingSeconds(projectId);
           }
+          elapsedSeconds -= step;
+          remainingNow -= step;
 
-          void flushPendingSeconds(projectId);
-          setMode(nextMode);
-          setCycle(nextCycle);
-          void loadSummary(projectId);
-          return durations[nextMode];
+          if (remainingNow <= 0) {
+            if (modeNow === "focus") {
+              completedFocusBlocks += 1;
+              modeNow = "shortBreak";
+              remainingNow = durations.shortBreak;
+            } else {
+              modeNow = "focus";
+              remainingNow = durations.focus;
+              shouldStop = true;
+              elapsedSeconds = 0;
+            }
+          }
         }
 
-        return next;
+        if (modeNow !== mode) setMode(modeNow);
+        if (shouldStop && running) setRunning(false);
+        if (completedFocusBlocks > 0) {
+          void flushPendingSeconds(projectId).then(async () => {
+            const payload = await loadSummary(projectId);
+            if (payload) {
+              setCompletionState({
+                reason: "completed",
+                todayMinutes: payload.todayMinutes,
+              });
+            }
+          });
+        }
+
+        return Math.max(1, remainingNow);
       });
     }, 1000);
 
     return () => {
       clearInterval(timer);
+      tickAtRef.current = null;
       void flushPendingSeconds(projectId);
     };
-  }, [running, mode, cycle, longEvery, projectId, durations]);
+  }, [running, mode, projectId, durations]);
 
   useEffect(() => {
     const isFocusRunning = running && mode === "focus";
@@ -484,13 +516,31 @@ export function DashboardApp({ username }: { username: string }) {
   }, [running, mode]);
 
   useEffect(() => {
-    const tick = () => {
-      void loadOuraMetrics(running && mode === "focus" ? focusSessionStartedAtRef.current : null);
+    let cancelled = false;
+    let timeout: number | null = null;
+
+    const loop = async () => {
+      const focusStart = running && mode === "focus" ? focusSessionStartedAtRef.current : null;
+      const result = await loadOuraMetrics(focusStart);
+      if (cancelled) return;
+
+      const baseInterval = running && mode === "focus" ? OURA_POLL_ACTIVE_MS : OURA_POLL_IDLE_MS;
+      if (result.rateLimited || result.networkError) {
+        ouraPollBackoffRef.current = Math.min(ouraPollBackoffRef.current * 2, OURA_POLL_MAX_BACKOFF_MS);
+      } else {
+        ouraPollBackoffRef.current = baseInterval;
+      }
+
+      timeout = window.setTimeout(loop, ouraPollBackoffRef.current);
     };
 
-    tick();
-    const timer = window.setInterval(tick, OURA_POLL_INTERVAL_MS);
-    return () => window.clearInterval(timer);
+    ouraPollBackoffRef.current = running && mode === "focus" ? OURA_POLL_ACTIVE_MS : OURA_POLL_IDLE_MS;
+    void loop();
+
+    return () => {
+      cancelled = true;
+      if (timeout) window.clearTimeout(timeout);
+    };
   }, [running, mode]);
 
   useEffect(() => {
@@ -591,24 +641,42 @@ export function DashboardApp({ username }: { username: string }) {
     q.set("projectId", nextProjectId);
 
     const res = await fetch(`/api/dashboard?${q.toString()}`, { cache: "no-store" });
-    if (!res.ok) return;
+    if (!res.ok) return null;
 
     const payload = (await res.json()) as DashboardSummary;
     setSummary(payload);
+    return payload;
   }
 
-  async function loadOuraMetrics(focusStart?: string | null) {
+  async function loadOuraMetrics(
+    focusStart?: string | null,
+    options?: { timeoutMs?: number },
+  ): Promise<{ ok: boolean; status: number | null; rateLimited: boolean; networkError: boolean; payload?: OuraMetrics }> {
     setOuraError(null);
     const query = new URLSearchParams();
     if (focusStart) query.set("focusStart", focusStart);
     const url = query.toString() ? `/api/oura/metrics?${query.toString()}` : "/api/oura/metrics";
-    const res = await fetch(url, { cache: "no-store" });
-    const payload = (await res.json()) as OuraMetrics & { error?: string };
-    if (!res.ok) {
-      setOuraError(payload.error || "Could not fetch Oura metrics.");
-      return;
+    try {
+      const controller = new AbortController();
+      const timeoutMs = Math.max(3000, options?.timeoutMs ?? 15000);
+      const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+      const res = await fetch(url, { cache: "no-store", signal: controller.signal });
+      window.clearTimeout(timeout);
+      const payload = (await res.json()) as OuraMetrics & { error?: string };
+      if (!res.ok) {
+        setOuraError(payload.error || "Could not fetch Oura metrics.");
+        return { ok: false, status: res.status, rateLimited: res.status === 429, networkError: false };
+      }
+      setOuraMetrics(payload);
+      return { ok: true, status: res.status, rateLimited: false, networkError: false, payload };
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setOuraError("Oura request timed out. Please try again.");
+      } else {
+        setOuraError(error instanceof Error ? error.message : "Could not fetch Oura metrics.");
+      }
+      return { ok: false, status: null, rateLimited: false, networkError: true };
     }
-    setOuraMetrics(payload);
   }
 
   async function persistFocusTelemetry() {
@@ -664,11 +732,64 @@ export function DashboardApp({ username }: { username: string }) {
     window.location.href = "/login";
   }
 
+  async function refreshSummaryAndCelebrate(reason: "finished" | "completed") {
+    const payload = await loadSummary(projectId);
+    if (!payload) return;
+    setCompletionState({
+      reason,
+      todayMinutes: payload.todayMinutes,
+    });
+  }
+
+  async function finishSession() {
+    await flushPendingSeconds(projectId);
+    setRunning(false);
+    setRemaining(durations[mode]);
+    await refreshSummaryAndCelebrate("finished");
+    setMessage("Session finished and logged.");
+  }
+
+  async function syncNow() {
+    if (syncCooldownActive) return;
+    setLastManualSyncAt(Date.now());
+    if (syncCooldownTimeoutRef.current) window.clearTimeout(syncCooldownTimeoutRef.current);
+    syncCooldownTimeoutRef.current = window.setTimeout(() => {
+      setLastManualSyncAt(null);
+      syncCooldownTimeoutRef.current = null;
+    }, 30_000);
+    setSyncHint(null);
+    const result = await loadOuraMetrics(running && mode === "focus" ? focusSessionStartedAtRef.current : null, {
+      timeoutMs: 12000,
+    });
+    if (!result.ok) {
+      if (result.networkError) {
+        setSyncHint("Sync timed out. Try again, or open Oura and sync your ring.");
+      }
+      return;
+    }
+
+    const latest = computeSampleAgeMinutes(result.payload?.latestHeartRateTime ?? null);
+    if (latest !== null && latest >= 10) {
+      setSyncHint("Oura data can be delayed — open Oura and sync your ring.");
+    }
+  }
+
   const activeMode = MODES[mode];
   const ringOffset = 590 * (1 - remaining / (durations[mode] || 1));
   const stressTodaySummary = ouraMetrics?.stressToday
-    ? `Today: Stressed ${formatDurationFromMinutes(ouraMetrics.stressToday.stressedHours)}`
+    ? `Today: Stressed ${formatDurationFromMinutes(ouraMetrics.stressToday.stressedMinutes)}`
     : "Today: No stress data";
+  const latestSampleAgeMinutes = computeSampleAgeMinutes(ouraMetrics?.latestHeartRateTime ?? null);
+  const latestHrValue = ouraMetrics?.latestHeartRate ?? null;
+  const latestHrText =
+    latestHrValue !== null
+      ? latestSampleAgeMinutes !== null
+        ? `${latestHrValue} bpm · ${latestSampleAgeMinutes} min ago`
+        : `${latestHrValue} bpm`
+      : "-- bpm";
+  const shouldShowSyncNow =
+    ouraMetrics?.connected === true && latestSampleAgeMinutes !== null && latestSampleAgeMinutes >= 10;
+  const syncCooldownActive = lastManualSyncAt !== null && Date.now() - lastManualSyncAt < 30_000;
   const activeProject = projectId === "all" ? null : projects.find((p) => p.id === projectId) || null;
   const activeProjectName = activeProject?.name || "No Project";
   const displayRollingAvgBpm = rollingAvgBpm ?? computeRollingFiveMinuteAvg(ouraMetrics?.heartRateSamples ?? []);
@@ -713,6 +834,9 @@ export function DashboardApp({ username }: { username: string }) {
             <Link className="ghost nav-link" href="/projects">
               Projects
             </Link>
+            <Link className="ghost nav-link" href="/history">
+              History
+            </Link>
             <Link className="ghost nav-link" href="/stats">
               Stats
             </Link>
@@ -742,6 +866,9 @@ export function DashboardApp({ username }: { username: string }) {
                   </Link>
                   <Link className="mobile-nav-item" href="/projects" onClick={() => setMobileMenuOpen(false)}>
                     Projects
+                  </Link>
+                  <Link className="mobile-nav-item" href="/history" onClick={() => setMobileMenuOpen(false)}>
+                    History
                   </Link>
                   <Link className="mobile-nav-item" href="/stats" onClick={() => setMobileMenuOpen(false)}>
                     Stats
@@ -773,7 +900,7 @@ export function DashboardApp({ username }: { username: string }) {
                 setRemaining(durations[m]);
               }}
             >
-              {m === "focus" ? "Focus" : m === "shortBreak" ? "Short Break" : "Long Break"}
+              {m === "focus" ? "Focus" : "Short Break"}
             </button>
           ))}
         </nav>
@@ -793,9 +920,6 @@ export function DashboardApp({ username }: { username: string }) {
             <div className="clock-text">
               <p>{activeMode.label}</p>
               <p className="time-display">{formatTime(Math.max(0, remaining))}</p>
-              <p>
-                Cycle {cycle} of {longEvery}
-              </p>
             </div>
           </section>
         </section>
@@ -839,6 +963,9 @@ export function DashboardApp({ username }: { username: string }) {
           >
             Reset
           </button>
+          <button className="ghost" onClick={() => void finishSession()}>
+            Finish
+          </button>
           <button
             className="ghost"
             onClick={async () => {
@@ -854,6 +981,9 @@ export function DashboardApp({ username }: { username: string }) {
         <section className="control-row-mobile" aria-label="Mobile timer controls">
           <button className="primary" onClick={() => setRunning((v) => !v)}>
             {running ? "Pause" : "Start"}
+          </button>
+          <button className="ghost" onClick={() => void finishSession()}>
+            Finish
           </button>
           <button className="ghost mobile-tools-toggle" onClick={() => setMobileToolsOpen((v) => !v)}>
             {mobileToolsOpen ? "Hide Controls" : "More Controls"}
@@ -961,7 +1091,7 @@ export function DashboardApp({ username }: { username: string }) {
                     {focusSignal === "steady" ? "● Focus steady" : focusSignal === "slow_down" ? "◐ Slow down" : "▲ Take a break"}
                   </p>
                   <div className="bio-metrics-grid">
-                    <span className="bio-metric-pill">Current HR: {ouraMetrics.latestHeartRate ?? "--"} bpm</span>
+                    <span className="bio-metric-pill">Latest HR: {latestHrText}</span>
                     <span className="bio-metric-pill">Rolling 5-min avg: {displayRollingAvgBpm ? Math.round(displayRollingAvgBpm) : "--"} bpm</span>
                     <span className="bio-metric-pill">
                       Baseline: {displayBaselineBpm ? Math.round(displayBaselineBpm) : "--"} bpm
@@ -980,7 +1110,7 @@ export function DashboardApp({ username }: { username: string }) {
                   {bioDetailsOpen ? (
                     <div className="bio-mobile-details">
                       <div className="bio-metrics-grid">
-                        <span className="bio-metric-pill">Current HR: {ouraMetrics.latestHeartRate ?? "--"} bpm</span>
+                        <span className="bio-metric-pill">Latest HR: {latestHrText}</span>
                         <span className="bio-metric-pill">Rolling 5-min avg: {displayRollingAvgBpm ? Math.round(displayRollingAvgBpm) : "--"} bpm</span>
                         <span className="bio-metric-pill">
                           Baseline: {displayBaselineBpm ? Math.round(displayBaselineBpm) : "--"} bpm
@@ -992,10 +1122,18 @@ export function DashboardApp({ username }: { username: string }) {
                 </div>
                 {!ouraMetrics.heartRateSamples.length ? (
                   <p className="chip-subvalue">
-                    Waiting for Oura heart-rate samples (can be delayed). Press Start Focus, wear your ring, and sync Oura.
+                    Waiting for Oura heart-rate samples (can be delayed).
                   </p>
                 ) : null}
                 <p className="chip-subvalue">Last HR sample: {formatTimestampLabel(ouraMetrics.latestHeartRateTime)}</p>
+                {shouldShowSyncNow ? (
+                  <div className="control-row" style={{ justifyContent: "flex-start", marginTop: "0.45rem" }}>
+                    <button className="ghost" disabled={syncCooldownActive} onClick={() => void syncNow()}>
+                      {syncCooldownActive ? "Sync now (wait...)" : "Sync now"}
+                    </button>
+                  </div>
+                ) : null}
+                {syncHint ? <p className="chip-subvalue">{syncHint}</p> : null}
                 {!running || mode !== "focus" ? (
                   <p className="chip-subvalue">Auto-pause nudges activate during Focus runs; live HR status works anytime.</p>
                 ) : null}
@@ -1003,10 +1141,10 @@ export function DashboardApp({ username }: { username: string }) {
                   <div className="stress-context">
                     <p className="chip-label">Today so far</p>
                     <div className="stress-chip-row">
-                      <span className="stress-chip">Stressed · {formatDurationFromMinutes(ouraMetrics.stressToday.stressedHours)}</span>
-                      <span className="stress-chip">Engaged · {formatDurationFromMinutes(ouraMetrics.stressToday.engagedHours)}</span>
-                      <span className="stress-chip">Relaxed · {formatDurationFromMinutes(ouraMetrics.stressToday.relaxedHours)}</span>
-                      <span className="stress-chip">Restored · {formatDurationFromMinutes(ouraMetrics.stressToday.restoredHours)}</span>
+                      <span className="stress-chip">Stressed · {formatDurationFromMinutes(ouraMetrics.stressToday.stressedMinutes)}</span>
+                      <span className="stress-chip">Engaged · {formatDurationFromMinutes(ouraMetrics.stressToday.engagedMinutes)}</span>
+                      <span className="stress-chip">Relaxed · {formatDurationFromMinutes(ouraMetrics.stressToday.relaxedMinutes)}</span>
+                      <span className="stress-chip">Restored · {formatDurationFromMinutes(ouraMetrics.stressToday.restoredMinutes)}</span>
                     </div>
                   </div>
                 ) : null}
@@ -1114,6 +1252,27 @@ export function DashboardApp({ username }: { username: string }) {
                 }}
               >
                 Save Log
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {completionState ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Session complete">
+          <section className="modal-card completion-card">
+            <header className="modal-head">
+              <h2>{completionState.reason === "completed" ? "Pomodoro Complete" : "Session Finished"}</h2>
+              <button className="ghost" onClick={() => setCompletionState(null)}>
+                Close
+              </button>
+            </header>
+            <p className="rank-change-copy">
+              Great work. You have logged <strong>{formatMinutesAsHours(completionState.todayMinutes)}</strong> today.
+            </p>
+            <div className="control-row modal-actions">
+              <button className="primary" onClick={() => setCompletionState(null)}>
+                Keep Going
               </button>
             </div>
           </section>

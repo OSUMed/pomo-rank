@@ -33,7 +33,9 @@ export async function GET(req: NextRequest) {
     const focusStart = req.nextUrl.searchParams.get("focusStart");
     const debugRaw = (req.nextUrl.searchParams.get("debug") || "").toLowerCase();
     const debug = debugRaw === "1" || debugRaw === "true" || debugRaw === "yes";
-    const metrics = await getOuraBiofeedback(session.userId, focusStart, { debug });
+    const rawRowsFlag = (req.nextUrl.searchParams.get("raw") || "").toLowerCase();
+    const includeRawHeartRateRows = rawRowsFlag === "1" || rawRowsFlag === "true" || rawRowsFlag === "yes";
+    const metrics = await getOuraBiofeedback(session.userId, focusStart, { debug, includeRawHeartRateRows });
     return NextResponse.json({
       configured: true,
       missing: [],

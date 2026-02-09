@@ -142,6 +142,9 @@ export function ProjectsApp({ username }: { username: string }) {
               <Link className="ghost nav-link" href="/dashboard">
                 Back Timer
               </Link>
+              <Link className="ghost nav-link" href="/history">
+                History
+              </Link>
               <Link className="ghost nav-link" href="/stats">
                 Stats
               </Link>

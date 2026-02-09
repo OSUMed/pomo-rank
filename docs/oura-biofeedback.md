@@ -4,9 +4,9 @@ This document explains exactly how the dashboard biofeedback values are defined,
 
 ## UI Terms and Definitions
 
-### 1) `Current HR`
+### 1) `Latest HR`
 - Meaning: The most recent heart-rate sample in bpm from Oura.
-- UI label: `Current HR: <value> bpm`
+- UI label: `Latest HR: <value> bpm · <age> min ago`
 - Source field: `latestHeartRate` from `/api/oura/metrics`.
 
 ### 2) `Rolling 5-min avg`
@@ -130,10 +130,10 @@ Example response from `/api/oura/metrics`:
   "latestHeartRateTime": "2026-02-08T20:09:08.000Z",
   "stressToday": {
     "date": "2026-02-08",
-    "stressedHours": 15,
-    "engagedHours": 0,
-    "relaxedHours": 0,
-    "restoredHours": 0
+    "stressedMinutes": 15,
+    "engagedMinutes": 0,
+    "relaxedMinutes": 0,
+    "restoredMinutes": 0
   },
   "profile": {
     "baselineMedianBpm": null,
@@ -145,7 +145,7 @@ Example response from `/api/oura/metrics`:
 ```
 
 UI mapping from this example:
-- `Current HR` = `latestHeartRate` => `89 bpm`
+- `Latest HR` = `latestHeartRate` => `89 bpm`
 - `Last HR sample` = `latestHeartRateTime` => shown as local date-time
 - `Rolling 5-min avg` = average over samples in latest 5 minutes
   - with above subset, approx `(73 + 84 + 89) / 3 = 82 bpm`
@@ -157,10 +157,9 @@ UI mapping from this example:
   - still computed from rolling and fallback effective baseline logic
   - outside focus mode, state can show `Slow down` without auto-pause
 - `Today so far` chips from `stressToday`:
-  - `Stressed 15h`, `Engaged 0h`, `Relaxed 0h`, `Restored 0h`
+  - `Stressed 15 min`, `Engaged 0 min`, `Relaxed 0 min`, `Restored 0 min`
 
 ## Notes on Delayed Data
 - Oura heartrate can be delayed; not guaranteed to look real-time.
 - UI message for empty HR:
-  - `Waiting for Oura heart-rate samples (can be delayed). Press Start Focus, wear your ring, and sync Oura.`
-
+  - `Waiting for Oura heart-rate samples (can be delayed).`

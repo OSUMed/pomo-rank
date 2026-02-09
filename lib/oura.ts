@@ -5,9 +5,10 @@ const OURA_AUTH_URL = "https://cloud.ouraring.com/oauth/authorize";
 const OURA_TOKEN_URL = "https://api.ouraring.com/oauth/token";
 const OURA_API_BASE = "https://api.ouraring.com";
 const TOKEN_EXPIRY_BUFFER_MS = 90 * 1000;
+const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-const FOCUS_PADDING_MS = 2 * 60 * 60 * 1000;
+const FOCUS_LOOKBACK_MS = 10 * 60 * 1000;
 const MAX_PAGES = 25;
 const refreshLocks = new Map<string, Promise<string>>();
 
@@ -54,10 +55,10 @@ export type OuraHeartRateSample = {
 
 export type OuraStressBuckets = {
   date: string | null;
-  stressedHours: number;
-  engagedHours: number;
-  relaxedHours: number;
-  restoredHours: number;
+  stressedMinutes: number;
+  engagedMinutes: number;
+  relaxedMinutes: number;
+  restoredMinutes: number;
 };
 
 export type OuraBiofeedback = {
@@ -68,6 +69,9 @@ export type OuraBiofeedback = {
   stressToday: OuraStressBuckets | null;
   profile: OuraFocusProfile;
   warning: string | null;
+  debug?: {
+    rawHeartRateRows?: Record<string, unknown>[];
+  };
 };
 
 export type OuraScopeDebug = {
@@ -369,55 +373,31 @@ function minMaxTimestamp(samples: OuraHeartRateSample[]) {
   };
 }
 
-function toHours(minutes: number | null | undefined) {
-  if (!minutes || minutes <= 0) return 0;
-  return Math.round((minutes / 60) * 10) / 10;
-}
-
-function toHoursFromSeconds(seconds: number | null | undefined) {
-  if (!seconds || seconds <= 0) return 0;
-  return Math.round((seconds / 3600) * 10) / 10;
-}
-
-function normalizeDurationToHours(raw: number | null, unitHint?: "minutes" | "seconds" | "hours") {
+function normalizeDurationToMinutes(raw: number | null, unitHint: "minutes" | "seconds" | "hours") {
   if (!raw || raw <= 0) return 0;
-  if (unitHint === "minutes") return toHours(raw);
-  if (unitHint === "seconds") return toHoursFromSeconds(raw);
-  if (unitHint === "hours") {
-    // Guardrail: daily stress spans are frequently minute-like values.
-    // If an \"hours\" field reports >12, interpret as minutes to avoid impossible 24h+ displays.
-    if (raw > 12) return toHours(raw);
-    return Math.round(raw * 10) / 10;
-  }
-
-  // Fallback heuristic for unknown keys:
-  //  - >= 3600 likely seconds
-  //  - > 24 likely minutes
-  //  - <= 24 likely hours
-  if (raw >= 3600) return toHoursFromSeconds(raw);
-  if (raw > 24) return toHours(raw);
-  return Math.round(raw * 10) / 10;
+  if (unitHint === "minutes") return Math.round(raw);
+  if (unitHint === "seconds") return Math.round(raw / 60);
+  // Oura daily_stress occasionally returns minute-like values on *_hours keys.
+  // Guardrail: treat large "hours" as already-minutes.
+  if (raw > 16) return Math.round(raw);
+  return Math.round(raw * 60);
 }
 
-function pickDurationHours(
+function pickDurationMinutes(
   row: Record<string, unknown>,
-  keys: { minutes?: string[]; seconds?: string[]; hours?: string[]; fallback?: string[] },
+  keys: { minutes?: string[]; seconds?: string[]; hours?: string[] },
 ) {
   for (const key of keys.minutes ?? []) {
     const value = asNumber(row[key]);
-    if (value !== null) return normalizeDurationToHours(value, "minutes");
+    if (value !== null) return normalizeDurationToMinutes(value, "minutes");
   }
   for (const key of keys.seconds ?? []) {
     const value = asNumber(row[key]);
-    if (value !== null) return normalizeDurationToHours(value, "seconds");
+    if (value !== null) return normalizeDurationToMinutes(value, "seconds");
   }
   for (const key of keys.hours ?? []) {
     const value = asNumber(row[key]);
-    if (value !== null) return normalizeDurationToHours(value, "hours");
-  }
-  for (const key of keys.fallback ?? []) {
-    const value = asNumber(row[key]);
-    if (value !== null) return normalizeDurationToHours(value);
+    if (value !== null) return normalizeDurationToMinutes(value, "hours");
   }
   return 0;
 }
@@ -471,29 +451,25 @@ function normalizeStressStateLabel(value: string) {
 function summarizeStressToday(row: Record<string, unknown> | null): OuraStressBuckets | null {
   if (!row) return null;
 
-  const restoredHours = pickDurationHours(row, {
+  const restoredMinutes = pickDurationMinutes(row, {
     minutes: ["restorative_minutes", "recovery_minutes", "restored_minutes"],
     seconds: ["restorative_seconds", "recovery_seconds", "restored_seconds"],
     hours: ["restorative_hours", "recovery_hours", "restored_hours"],
-    fallback: ["restorative", "recovery", "restored"],
   });
-  const relaxedHours = pickDurationHours(row, {
+  const relaxedMinutes = pickDurationMinutes(row, {
     minutes: ["low_stress_minutes", "relaxed_minutes", "stress_low"],
     seconds: ["low_stress_seconds", "relaxed_seconds"],
     hours: ["low_stress_hours", "relaxed_hours"],
-    fallback: ["relaxed"],
   });
-  const engagedHours = pickDurationHours(row, {
+  const engagedMinutes = pickDurationMinutes(row, {
     minutes: ["medium_stress_minutes", "engaged_minutes", "stress_medium"],
     seconds: ["medium_stress_seconds", "engaged_seconds"],
     hours: ["medium_stress_hours", "engaged_hours"],
-    fallback: ["engaged"],
   });
-  const stressedHours = pickDurationHours(row, {
+  const stressedMinutes = pickDurationMinutes(row, {
     minutes: ["high_stress_minutes", "stressed_minutes", "stress_high"],
     seconds: ["high_stress_seconds", "stressed_seconds"],
     hours: ["high_stress_hours", "stressed_hours"],
-    fallback: ["stressed"],
   });
 
   const directState =
@@ -501,23 +477,23 @@ function summarizeStressToday(row: Record<string, unknown> | null): OuraStressBu
     (typeof row.state === "string" ? normalizeStressStateLabel(row.state) : null);
 
   if (directState) {
-    if (directState === "Stressed" && stressedHours === 0) {
+    if (directState === "Stressed" && stressedMinutes === 0) {
       return {
         date: String(row.day ?? row.date ?? "") || null,
-        stressedHours: 0.1,
-        engagedHours,
-        relaxedHours,
-        restoredHours,
+        stressedMinutes: 1,
+        engagedMinutes,
+        relaxedMinutes,
+        restoredMinutes,
       };
     }
   }
 
   return {
     date: String(row.day ?? row.date ?? "") || null,
-    stressedHours,
-    engagedHours,
-    relaxedHours,
-    restoredHours,
+    stressedMinutes,
+    engagedMinutes,
+    relaxedMinutes,
+    restoredMinutes,
   };
 }
 
@@ -534,9 +510,9 @@ async function fetchHeartRateWithFallback(
   debug?: boolean,
 ) {
   const now = new Date();
-  const start24 = new Date(now.getTime() - TWENTY_FOUR_HOURS_MS);
-  const focusBufferedStart = focusStart ? new Date(focusStart.getTime() - FOCUS_PADDING_MS) : null;
-  const primaryStart = focusBufferedStart && focusBufferedStart < start24 ? focusBufferedStart : start24;
+  const primaryStart = focusStart
+    ? new Date(focusStart.getTime() - FOCUS_LOOKBACK_MS)
+    : new Date(now.getTime() - TWO_HOURS_MS);
 
   const primaryParams = new URLSearchParams({
     start_datetime: primaryStart.toISOString(),
@@ -560,31 +536,52 @@ async function fetchHeartRateWithFallback(
 
   if ((primary.data?.length ?? 0) > 0) return primary;
 
-  const fallbackStart = new Date(now.getTime() - SEVEN_DAYS_MS);
-  const fallbackParams = new URLSearchParams({
-    start_datetime: fallbackStart.toISOString(),
+  const fallback24Start = new Date(now.getTime() - TWENTY_FOUR_HOURS_MS);
+  const fallback24Params = new URLSearchParams({
+    start_datetime: fallback24Start.toISOString(),
     end_datetime: now.toISOString(),
   });
 
   if (isOuraDebugEnabled(debug)) {
-    console.info("[OURA_DEBUG] heartrate_window_fallback", {
-      start_datetime: fallbackParams.get("start_datetime"),
-      end_datetime: fallbackParams.get("end_datetime"),
+    console.info("[OURA_DEBUG] heartrate_window_fallback_24h", {
+      start_datetime: fallback24Params.get("start_datetime"),
+      end_datetime: fallback24Params.get("end_datetime"),
+    });
+  }
+
+  const fallback24 = await fetchOuraCollectionPaginated<Record<string, unknown>>(
+    "/v2/usercollection/heartrate",
+    token,
+    fallback24Params,
+    { debug, label: "heartrate_fallback_24h" },
+  );
+  if ((fallback24.data?.length ?? 0) > 0) return fallback24;
+
+  const fallback7dStart = new Date(now.getTime() - SEVEN_DAYS_MS);
+  const fallback7dParams = new URLSearchParams({
+    start_datetime: fallback7dStart.toISOString(),
+    end_datetime: now.toISOString(),
+  });
+
+  if (isOuraDebugEnabled(debug)) {
+    console.info("[OURA_DEBUG] heartrate_window_fallback_7d", {
+      start_datetime: fallback7dParams.get("start_datetime"),
+      end_datetime: fallback7dParams.get("end_datetime"),
     });
   }
 
   return fetchOuraCollectionPaginated<Record<string, unknown>>(
     "/v2/usercollection/heartrate",
     token,
-    fallbackParams,
-    { debug, label: "heartrate_fallback" },
+    fallback7dParams,
+    { debug, label: "heartrate_fallback_7d" },
   );
 }
 
 export async function getOuraBiofeedback(
   userId: string,
   focusStartInput?: string | null,
-  options?: { debug?: boolean },
+  options?: { debug?: boolean; includeRawHeartRateRows?: boolean },
 ): Promise<OuraBiofeedback> {
   let token: string | null = null;
   try {
@@ -622,6 +619,7 @@ export async function getOuraBiofeedback(
   const parsedFocusStart = parseFocusStart(focusStartInput);
   const now = new Date();
   const debug = options?.debug;
+  const includeRawHeartRateRows = Boolean(options?.includeRawHeartRateRows);
 
   const [profile, heartRateResult, stressResult] = await Promise.all([
     getFocusProfile(userId),
@@ -657,11 +655,16 @@ export async function getOuraBiofeedback(
 
   if (isOuraDebugEnabled(debug)) {
     const span = minMaxTimestamp(samples);
+    const rawRows = heartRateResult.data ?? [];
     console.info("[OURA_DEBUG] heartrate_summary", {
-      documents: (heartRateResult.data ?? []).length,
+      documents: rawRows.length,
       mappedSamples: samples.length,
       minTimestamp: span.min,
       maxTimestamp: span.max,
+    });
+    console.info("[OURA_DEBUG] heartrate_raw_preview", {
+      firstRows: rawRows.slice(0, 3),
+      lastRows: rawRows.slice(-3),
     });
     console.info("[OURA_DEBUG] stress_summary", {
       rawKeys: stressRow ? Object.keys(stressRow).sort() : [],
@@ -680,6 +683,12 @@ export async function getOuraBiofeedback(
     stressToday,
     profile,
     warning: null,
+    debug:
+      isOuraDebugEnabled(debug) && includeRawHeartRateRows
+        ? {
+            rawHeartRateRows: (heartRateResult.data ?? []).slice(0, 500),
+          }
+        : undefined,
   };
 }
 

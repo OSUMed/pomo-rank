@@ -522,6 +522,10 @@ input, select { width: 100%; padding: .6rem .7rem; border-radius: 10px; border: 
   background: linear-gradient(145deg, rgba(232,241,255,.98), rgba(250,253,255,.95));
   border-color: #c3d7f3;
 }
+.completion-card {
+  background: linear-gradient(145deg, rgba(236,250,241,.98), rgba(251,255,252,.95));
+  border-color: #bde4cb;
+}
 .side-panel {
   width: min(480px, 100%);
   height: min(100vh, 820px);
@@ -627,6 +631,33 @@ input, select { width: 100%; padding: .6rem .7rem; border-radius: 10px; border: 
   width: 100%;
   text-align: left;
 }
+.history-list {
+  margin-top: .8rem;
+  display: grid;
+  gap: .6rem;
+}
+.history-row {
+  border: 1px solid #dce5f1;
+  border-radius: 12px;
+  background: #fff;
+  padding: .72rem .78rem;
+  display: grid;
+  gap: .45rem;
+}
+.history-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .6rem;
+}
+.history-submeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .6rem;
+  color: var(--ink-muted);
+  font-size: .82rem;
+}
 
 @media (max-width: 980px) {
   .stats-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); }
@@ -689,6 +720,7 @@ input, select { width: 100%; padding: .6rem .7rem; border-radius: 10px; border: 
   .x-labels span { font-size: .68rem; }
   .modal-card, .side-panel { padding: .9rem; width: 100%; border-radius: 16px; }
   .side-panel { height: auto; max-height: 86vh; }
+  .history-submeta { flex-direction: column; align-items: flex-start; }
 
   .stats-controls-desktop { display: none; }
   .stats-controls-mobile {

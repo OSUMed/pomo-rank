@@ -284,6 +284,67 @@ export async function addLog(params: {
   if (error) throw error;
 }
 
+export type RecentLogEntry = {
+  id: string;
+  projectId: string | null;
+  projectName: string;
+  logDate: string;
+  seconds: number;
+  source: "timer" | "manual";
+  createdAt: string;
+};
+
+export async function getRecentLogs(userId: string, opts?: { limit?: number; date?: string }) {
+  const safeLimit = Math.max(1, Math.min(30, Math.floor(Number(opts?.limit ?? 30))));
+
+  let query = supabase
+    .from("focus_logs")
+    .select("id, project_id, log_date, seconds, source, created_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(safeLimit);
+
+  if (opts?.date) {
+    query = query.eq("log_date", opts.date);
+  }
+
+  const { data, error } = await query;
+  if (error) throw error;
+
+  const projects = await listProjects(userId, true);
+  const projectMap = new Map<string, string>();
+  for (const project of projects) projectMap.set(project.id, project.name);
+
+  return (data ?? []).map((row) => ({
+    id: String(row.id),
+    projectId: row.project_id ?? null,
+    projectName: row.project_id ? projectMap.get(row.project_id) || "Unknown project" : "No project",
+    logDate: String(row.log_date),
+    seconds: Number(row.seconds) || 0,
+    source: row.source === "manual" ? "manual" : "timer",
+    createdAt: String(row.created_at),
+  })) as RecentLogEntry[];
+}
+
+export async function deleteRecentLog(userId: string, logId: string) {
+  const { data: recentRows, error: recentError } = await supabase
+    .from("focus_logs")
+    .select("id")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(30);
+
+  if (recentError) throw recentError;
+
+  const allowed = new Set((recentRows ?? []).map((row) => String(row.id)));
+  if (!allowed.has(logId)) {
+    throw new Error("You can only delete entries from your most recent 30 logs.");
+  }
+
+  const { error } = await supabase.from("focus_logs").delete().eq("user_id", userId).eq("id", logId);
+  if (error) throw error;
+}
+
 export async function getTodaySummary(userId: string, projectId: string | "all") {
   const todayRange = getRangeByPeriod("day", new Date());
   const weekRange = getRangeByPeriod("week", new Date());
