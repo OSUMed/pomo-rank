@@ -70,6 +70,10 @@ export function StatsApp({ username }: { username: string }) {
   const [period, setPeriod] = useState<Period>("week");
   const [anchorDate, setAnchorDate] = useState(todayDateString());
   const [stats, setStats] = useState<StatsResponse | null>(null);
+  const [mobilePicker, setMobilePicker] = useState<"project" | "period" | null>(null);
+  const [comparisonsOpen, setComparisonsOpen] = useState(false);
+  const [trendOpen, setTrendOpen] = useState(true);
+  const [projectsOpen, setProjectsOpen] = useState(true);
 
   useEffect(() => {
     void (async () => {
@@ -96,6 +100,14 @@ export function StatsApp({ username }: { username: string }) {
     await fetch("/api/auth/logout", { method: "POST" });
     window.location.href = "/login";
   }
+
+  const activeProjectName =
+    projectId === "all" ? "All Projects" : projects.find((project) => project.id === projectId)?.name || "All Projects";
+  const periodLabel =
+    period === "day" ? "Day" : period === "week" ? "Week (7d)" : period === "month" ? "Month (30d)" : "Year (365d)";
+
+  const chartTitle =
+    period === "day" ? "Day Trend" : period === "week" ? "Week Trend" : period === "month" ? "Month Trend" : "Year Trend";
 
   const chartModel = useMemo(() => {
     const points = stats?.chartPoints ?? [];
@@ -149,7 +161,7 @@ export function StatsApp({ username }: { username: string }) {
           </div>
         </header>
 
-        <section className="filters-row">
+        <section className="filters-row stats-controls-desktop">
           <label className="inline-field inline-grow">
             Project
             <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
@@ -172,7 +184,7 @@ export function StatsApp({ username }: { username: string }) {
           </label>
         </section>
 
-        <section className="filters-row period-nav-row">
+        <section className="filters-row period-nav-row stats-controls-desktop">
           <button className="ghost" onClick={() => setAnchorDate(shiftDateString(anchorDate, -PERIOD_SHIFT[period]))}>
             Previous
           </button>
@@ -198,111 +210,205 @@ export function StatsApp({ username }: { username: string }) {
           </button>
         </section>
 
-        <section className="stats-metrics">
-          <article className="metric-card">
-            <p>Selected Range</p>
-            <h2>{stats ? formatRangeLabel(stats.range.startDate, stats.range.endDate) : "-"}</h2>
-          </article>
-          <article className="metric-card">
-            <p>Total</p>
-            <h2>{stats?.totalMinutes ?? 0} min</h2>
-          </article>
-          <article className="metric-card">
-            <p>Avg / day</p>
-            <h2>{stats?.averageMinutes ?? 0} min</h2>
-          </article>
-          <Link className="metric-card rank-card rank-card-action" href={`/rank?projectId=${projectId}`}>
-            <p>Current Rank (7d avg) - tap to open ladder</p>
-            <h2>{stats?.rank.title ?? "Mortal"}</h2>
-            <span>{stats?.rank.subtitle ?? "The journey begins."}</span>
-          </Link>
-        </section>
-
-        <section className="compare-grid">
-          <article className="metric-card">
-            <p>Selected scope vs previous {period}</p>
-            <h2>{formatDelta(stats?.selectedComparison.deltaMinutes ?? 0)}</h2>
-            <span className="metric-note">{formatPercent(stats?.selectedComparison.percentChange ?? null)}</span>
-          </article>
-          <article className="metric-card">
-            <p>All projects vs previous {period}</p>
-            <h2>{formatDelta(stats?.allComparison.deltaMinutes ?? 0)}</h2>
-            <span className="metric-note">{formatPercent(stats?.allComparison.percentChange ?? null)}</span>
-          </article>
-        </section>
-
-        <section className="chart-panel">
-          <div className="chart-head">
-            <h2>
-              {period === "day"
-                ? "Day Trend"
-                : period === "week"
-                  ? "Week Trend"
-                  : period === "month"
-                    ? "Month Trend"
-                    : "Year Trend"}
-            </h2>
-            <p>Y-axis: minutes</p>
+        <section className="stats-controls-mobile" aria-label="Mobile stats controls">
+          <div className="stats-mobile-pickers">
+            <button className="ghost stats-picker-btn" onClick={() => setMobilePicker("project")}>
+              <span className="stats-picker-label">Project</span>
+              <span className="stats-picker-value">{activeProjectName}</span>
+            </button>
+            <button className="ghost stats-picker-btn" onClick={() => setMobilePicker("period")}>
+              <span className="stats-picker-label">Period</span>
+              <span className="stats-picker-value">{periodLabel}</span>
+            </button>
           </div>
-          <div className="line-chart-wrap">
-            <svg className="line-chart" viewBox={`0 0 ${chartModel.width} ${chartModel.height}`} role="img" aria-label="Focus trend chart">
-              <line
-                x1={chartModel.left}
-                y1={chartModel.height - chartModel.bottom}
-                x2={chartModel.width - 8}
-                y2={chartModel.height - chartModel.bottom}
-                className="axis-line"
-              />
-              <line x1={chartModel.left} y1={chartModel.top} x2={chartModel.left} y2={chartModel.height - chartModel.bottom} className="axis-line" />
-              <line
-                x1={chartModel.left}
-                y1={chartModel.top + (chartModel.height - chartModel.top - chartModel.bottom) / 2}
-                x2={chartModel.width - 8}
-                y2={chartModel.top + (chartModel.height - chartModel.top - chartModel.bottom) / 2}
-                className="guide-line"
-              />
-              {chartModel.areaPath ? <path d={chartModel.areaPath} className="trend-area" /> : null}
-              {chartModel.path ? <path d={chartModel.path} className="trend-line" /> : null}
-              {chartModel.coords.map((point) => (
-                <circle key={point.key} cx={point.x} cy={point.y} r={point.minutes > 0 ? 2.8 : 1.8} className="trend-dot">
-                  <title>{`${point.key}: ${point.minutes} min`}</title>
-                </circle>
-              ))}
-            </svg>
-            <div className="y-guides">
-              <span>{chartModel.max}m</span>
-              <span>{Math.floor(chartModel.max / 2)}m</span>
-              <span>0m</span>
-            </div>
-            <div className="x-labels">
-              {chartModel.labels.map((point) => (
-                <span key={`${point.key}-label`} style={{ left: `${(point.x / chartModel.width) * 100}%` }}>
-                  {point.label}
-                </span>
-              ))}
-            </div>
+          <div className="stats-mobile-nav">
+            <button className="ghost" onClick={() => setAnchorDate(shiftDateString(anchorDate, -PERIOD_SHIFT[period]))}>
+              Prev
+            </button>
+            <button className="ghost" onClick={() => setAnchorDate(todayDateString())}>
+              {period === "day" ? "Today" : "Current"}
+            </button>
+            <button className="ghost" onClick={() => setAnchorDate(shiftDateString(anchorDate, PERIOD_SHIFT[period]))}>
+              Next
+            </button>
           </div>
         </section>
 
-        <section className="rank-panel">
-          <h2>Projects Worked On</h2>
-          <div className="project-rows">
-            {(stats?.projectBreakdown || []).map((item) => (
-              <article key={`pr-${item.projectId}`} className="project-row">
-                <div className="project-row-meta">
-                  <strong>{item.name}</strong>
-                  <span>
-                    {formatHoursMinutes(item.minutes)} {item.percent}%
-                  </span>
-                </div>
-                <div className="project-row-bar-track">
-                  <div className="project-row-bar-fill" style={{ width: `${Math.max(3, item.percent)}%` }} />
-                </div>
+        <section className="summary-block">
+          <h2>Summary</h2>
+          <section className="stats-metrics stats-metrics-summary">
+            <article className="metric-card metric-card--full">
+              <p>Selected Range</p>
+              <h2>{stats ? formatRangeLabel(stats.range.startDate, stats.range.endDate) : "-"}</h2>
+            </article>
+            <article className="metric-card">
+              <p>Total</p>
+              <h2>{stats?.totalMinutes ?? 0} min</h2>
+            </article>
+            <article className="metric-card">
+              <p>Avg / day</p>
+              <h2>{stats?.averageMinutes ?? 0} min</h2>
+            </article>
+            <Link className="metric-card rank-card rank-card-action metric-card--full" href={`/rank?projectId=${projectId}`}>
+              <p>Current Rank (7d avg) - tap to open ladder</p>
+              <h2>{stats?.rank.title ?? "Mortal"}</h2>
+              <span>{stats?.rank.subtitle ?? "The journey begins."}</span>
+            </Link>
+          </section>
+        </section>
+
+        <section className={`mobile-accordion ${comparisonsOpen ? "is-open" : ""}`}>
+          <button className="mobile-accordion-toggle" onClick={() => setComparisonsOpen((v) => !v)}>
+            <h2>Comparisons</h2>
+            <span>{comparisonsOpen ? "Hide" : "Show"}</span>
+          </button>
+          <div className="mobile-accordion-body">
+            <section className="compare-grid">
+              <article className="metric-card">
+                <p>Selected scope vs previous {period}</p>
+                <h2>{formatDelta(stats?.selectedComparison.deltaMinutes ?? 0)}</h2>
+                <span className="metric-note">{formatPercent(stats?.selectedComparison.percentChange ?? null)}</span>
               </article>
-            ))}
-            {!stats?.projectBreakdown?.length ? <p className="hint">No projects worked on for this period.</p> : null}
+              <article className="metric-card">
+                <p>All projects vs previous {period}</p>
+                <h2>{formatDelta(stats?.allComparison.deltaMinutes ?? 0)}</h2>
+                <span className="metric-note">{formatPercent(stats?.allComparison.percentChange ?? null)}</span>
+              </article>
+            </section>
           </div>
         </section>
+
+        <section className={`mobile-accordion ${trendOpen ? "is-open" : ""}`}>
+          <button className="mobile-accordion-toggle" onClick={() => setTrendOpen((v) => !v)}>
+            <h2>{chartTitle}</h2>
+            <span>{trendOpen ? "Hide" : "Show"}</span>
+          </button>
+          <div className="mobile-accordion-body">
+            <section className="chart-panel">
+              <div className="chart-head">
+                <p>Y-axis: minutes</p>
+              </div>
+              <div className="line-chart-wrap">
+                <svg className="line-chart" viewBox={`0 0 ${chartModel.width} ${chartModel.height}`} role="img" aria-label="Focus trend chart">
+                  <line
+                    x1={chartModel.left}
+                    y1={chartModel.height - chartModel.bottom}
+                    x2={chartModel.width - 8}
+                    y2={chartModel.height - chartModel.bottom}
+                    className="axis-line"
+                  />
+                  <line x1={chartModel.left} y1={chartModel.top} x2={chartModel.left} y2={chartModel.height - chartModel.bottom} className="axis-line" />
+                  <line
+                    x1={chartModel.left}
+                    y1={chartModel.top + (chartModel.height - chartModel.top - chartModel.bottom) / 2}
+                    x2={chartModel.width - 8}
+                    y2={chartModel.top + (chartModel.height - chartModel.top - chartModel.bottom) / 2}
+                    className="guide-line"
+                  />
+                  {chartModel.areaPath ? <path d={chartModel.areaPath} className="trend-area" /> : null}
+                  {chartModel.path ? <path d={chartModel.path} className="trend-line" /> : null}
+                  {chartModel.coords.map((point) => (
+                    <circle key={point.key} cx={point.x} cy={point.y} r={point.minutes > 0 ? 2.8 : 1.8} className="trend-dot">
+                      <title>{`${point.key}: ${point.minutes} min`}</title>
+                    </circle>
+                  ))}
+                </svg>
+                <div className="y-guides">
+                  <span>{chartModel.max}m</span>
+                  <span>{Math.floor(chartModel.max / 2)}m</span>
+                  <span>0m</span>
+                </div>
+                <div className="x-labels">
+                  {chartModel.labels.map((point) => (
+                    <span key={`${point.key}-label`} style={{ left: `${(point.x / chartModel.width) * 100}%` }}>
+                      {point.label}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section className={`mobile-accordion ${projectsOpen ? "is-open" : ""}`}>
+          <button className="mobile-accordion-toggle" onClick={() => setProjectsOpen((v) => !v)}>
+            <h2>Projects Worked On</h2>
+            <span>{projectsOpen ? "Hide" : "Show"}</span>
+          </button>
+          <div className="mobile-accordion-body">
+            <section className="rank-panel">
+              <div className="project-rows">
+                {(stats?.projectBreakdown || []).map((item) => (
+                  <article key={`pr-${item.projectId}`} className="project-row">
+                    <div className="project-row-meta">
+                      <strong>{item.name}</strong>
+                      <span>
+                        {formatHoursMinutes(item.minutes)} {item.percent}%
+                      </span>
+                    </div>
+                    <div className="project-row-bar-track">
+                      <div className="project-row-bar-fill" style={{ width: `${Math.max(3, item.percent)}%` }} />
+                    </div>
+                  </article>
+                ))}
+                {!stats?.projectBreakdown?.length ? <p className="hint">No projects worked on for this period.</p> : null}
+              </div>
+            </section>
+          </div>
+        </section>
+
+        {mobilePicker ? (
+          <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Stats picker">
+            <section className="mobile-sheet stats-picker-sheet">
+              <header className="modal-head">
+                <h2>{mobilePicker === "project" ? "Pick Project" : "Pick Time Period"}</h2>
+                <button className="ghost" onClick={() => setMobilePicker(null)}>
+                  Close
+                </button>
+              </header>
+              <div className="mobile-project-list">
+                {mobilePicker === "project" ? (
+                  <>
+                    <button
+                      className={`project-badge ${projectId === "all" ? "is-active" : ""}`}
+                      onClick={() => {
+                        setProjectId("all");
+                        setMobilePicker(null);
+                      }}
+                    >
+                      All Projects
+                    </button>
+                    {projects.map((project) => (
+                      <button
+                        key={`pick-${project.id}`}
+                        className={`project-badge ${projectId === project.id ? "is-active" : ""}`}
+                        onClick={() => {
+                          setProjectId(project.id);
+                          setMobilePicker(null);
+                        }}
+                      >
+                        {project.name}
+                      </button>
+                    ))}
+                  </>
+                ) : (
+                  (["day", "week", "month", "year"] as Period[]).map((p) => (
+                    <button
+                      key={`period-${p}`}
+                      className={`project-badge ${period === p ? "is-active" : ""}`}
+                      onClick={() => {
+                        setPeriod(p);
+                        setMobilePicker(null);
+                      }}
+                    >
+                      {p === "day" ? "Day" : p === "week" ? "Week (7d)" : p === "month" ? "Month (30d)" : "Year (365d)"}
+                    </button>
+                  ))
+                )}
+              </div>
+            </section>
+          </div>
+        ) : null}
       </section>
     </main>
   );
